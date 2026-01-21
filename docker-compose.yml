@@ -11,6 +11,9 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
     expose:
       - "8080"
+    volumes:
+      - /etc/letsencrypt/live/194.32.140.234.sslip.io/fullchain.pem:/app/certs/cert.pem:ro
+      - /etc/letsencrypt/live/194.32.140.234.sslip.io/privkey.pem:/app/certs/key.pem:ro
 
   nginx:
     image: nginx:alpine
@@ -20,7 +23,8 @@ services:
       - "80:80"
       - "8443:443"
     volumes:
-      - /etc/letsencrypt/live/194.32.140.234.sslip.io/fullchain.pem:/app/certs/cert.pem:ro
-      - /etc/letsencrypt/live/194.32.140.234.sslip.io/privkey.pem:/app/certs/key.pem:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt/live/194.32.140.234.sslip.io/fullchain.pem:/etc/nginx/certs/cert.pem:ro
+      - /etc/letsencrypt/live/194.32.140.234.sslip.io/privkey.pem:/etc/nginx/certs/key.pem:ro
     depends_on:
       - bun
