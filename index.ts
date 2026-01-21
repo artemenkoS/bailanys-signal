@@ -1,19 +1,6 @@
 import { serve } from "bun";
 import type { ServerWebSocket } from "bun";
 import { createClient } from "@supabase/supabase-js";
-import { existsSync } from "fs";
-
-const CERT_PATH = process.env.TLS_CERT_PATH || "./certs/cert.pem";
-const KEY_PATH = process.env.TLS_KEY_PATH || "./certs/key.pem";
-
-if (!existsSync(CERT_PATH) || !existsSync(KEY_PATH)) {
-  console.error("❌ ОШИБКА: Сертификаты не найдены в папке ./certs/");
-  console.log("Сгенерируйте их командой:");
-  console.log(
-    'openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout ./certs/key.pem -out ./certs/cert.pem -subj "/CN=localhost"',
-  );
-  process.exit(1);
-}
 
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -216,12 +203,6 @@ const corsHeaders = {
 // Запуск сервера с поддержкой TLS
 serve<WSData>({
   port: process.env.PORT ?? 8080,
-
-  // Добавляем TLS сертификаты
-  tls: {
-    cert: Bun.file(CERT_PATH),
-    key: Bun.file(KEY_PATH),
-  },
 
   async fetch(req, server) {
     const url = new URL(req.url);
