@@ -80,7 +80,10 @@ function broadcastToRoom(
   }
 }
 
-const routes = {
+// Исправлена типизация роутов для устранения ошибки 'never'
+type RouteHandler = (req: Request) => Promise<Response>;
+
+const routes: Record<string, RouteHandler> = {
   "/api/register": async (req: Request) => {
     try {
       const body = (await req.json()) as RegisterRequest;
@@ -202,6 +205,7 @@ const corsHeaders = {
 
 serve<WSData>({
   port: process.env.PORT ?? 8080,
+  hostname: "0.0.0.0",
 
   async fetch(req, server) {
     const url = new URL(req.url);
@@ -213,13 +217,16 @@ serve<WSData>({
       const userId = token ? await validateToken(token) : null;
       if (!userId) return new Response("Unauthorized", { status: 401 });
 
-      return server.upgrade(req, { data: { userId } })
+      const upgraded = server.upgrade(req, { data: { userId } });
+      return upgraded
         ? undefined
         : new Response("Upgrade failed", { status: 500 });
     }
 
-    if (url.pathname in routes) {
-      const res = await routes[url.pathname as keyof typeof routes](req);
+    // Исправленный вызов роутов
+    const handler = routes[url.pathname];
+    if (handler) {
+      const res = await handler(req);
       Object.entries(corsHeaders).forEach(([k, v]) => res.headers.set(k, v));
       return res;
     }
@@ -306,6 +313,4 @@ serve<WSData>({
   },
 });
 
-console.log(
-  `Secure Server running on https://localhost:${process.env.PORT ?? 8080}`,
-);
+console.log(`Server is running on port ${process.env.PORT ?? 8080}`);
