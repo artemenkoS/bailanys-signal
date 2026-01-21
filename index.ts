@@ -200,7 +200,6 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-// Запуск сервера с поддержкой TLS
 serve<WSData>({
   port: process.env.PORT ?? 8080,
 

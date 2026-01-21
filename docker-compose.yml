@@ -11,9 +11,6 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
     expose:
       - "8080"
-    volumes:
-      - /etc/letsencrypt/live/194.32.140.234.sslip.io/fullchain.pem:/app/certs/cert.pem:ro
-      - /etc/letsencrypt/live/194.32.140.234.sslip.io/privkey.pem:/app/certs/key.pem:ro
 
   nginx:
     image: nginx:alpine
