@@ -1,0 +1,26 @@
+version: "1.0"
+
+services:
+  bun:
+    build: .
+    container_name: webrtc-bun
+    restart: always
+    environment:
+      PORT: 8080
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+    expose:
+      - "8080"
+
+  nginx:
+    image: nginx:alpine
+    container_name: webrtc-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - bun
