@@ -20,7 +20,7 @@ services:
       - "80:80"
       - "8443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /etc/letsencrypt/live/194.32.140.234.sslip.io/fullchain.pem:/app/certs/cert.pem:ro
+      - /etc/letsencrypt/live/194.32.140.234.sslip.io/privkey.pem:/app/certs/key.pem:ro
     depends_on:
       - bun
