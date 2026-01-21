@@ -223,7 +223,6 @@ serve<WSData>({
         : new Response("Upgrade failed", { status: 500 });
     }
 
-    // Исправленный вызов роутов
     const handler = routes[url.pathname];
     if (handler) {
       const res = await handler(req);
