@@ -5,9 +5,13 @@ import { routes } from "./src/routes";
 import { errorResponse, withCors } from "./src/http";
 import { setPresence, touchLastSeen, validateToken } from "./src/supabase";
 import { users } from "./src/state";
-import { broadcast, sendToUser } from "./src/ws";
-import { handleJoinRoom, handleLeaveRoom, removeUserFromRooms } from "./src/rooms";
-import { PRESENCE_HEARTBEAT_MS } from "./src/presence";
+import { broadcast, sendJson, sendToUser } from "./src/ws";
+import {
+  handleJoinRoom,
+  handleLeaveRoom,
+  removeUserFromRooms,
+} from "./src/rooms";
+import { PRESENCE_HEARTBEAT_MS, PRESENCE_TTL_MS } from "./src/presence";
 
 const port = process.env.PORT ?? 8080;
 const tlsEnabled = process.env.TLS_ENABLED === "true";
@@ -16,9 +20,11 @@ const keyPath = process.env.TLS_KEY_PATH ?? "certs/key.pem";
 const shouldAttemptTls =
   tlsEnabled || process.env.TLS_CERT_PATH || process.env.TLS_KEY_PATH;
 const hasTlsFiles = existsSync(certPath) && existsSync(keyPath);
-const tls = shouldAttemptTls && hasTlsFiles
-  ? { cert: Bun.file(certPath), key: Bun.file(keyPath) }
-  : undefined;
+const tls =
+  shouldAttemptTls && hasTlsFiles
+    ? { cert: Bun.file(certPath), key: Bun.file(keyPath) }
+    : undefined;
+const WS_OPEN_STATE = 1;
 
 if (shouldAttemptTls && !hasTlsFiles) {
   console.warn(
@@ -27,8 +33,20 @@ if (shouldAttemptTls && !hasTlsFiles) {
 }
 
 setInterval(() => {
-  const userIds = Array.from(users.keys());
-  void touchLastSeen(userIds);
+  const now = Date.now();
+  for (const [userId, sockets] of users) {
+    for (const ws of sockets) {
+      const lastPongAt = ws.data.lastPongAt ?? 0;
+      if (now - lastPongAt > PRESENCE_TTL_MS) {
+        console.warn(`[Presence] Timeout: ${userId}`);
+        ws.close(4001, "Presence timeout");
+        continue;
+      }
+      if (ws.readyState === WS_OPEN_STATE) {
+        sendJson(ws, { type: "presence-check", ts: now });
+      }
+    }
+  }
 }, PRESENCE_HEARTBEAT_MS);
 
 serve<WSData>({
@@ -66,6 +84,7 @@ serve<WSData>({
 
     async open(ws) {
       const { userId } = ws.data;
+      ws.data.lastPongAt = Date.now();
       let sockets = users.get(userId);
       const isFirstConnection = !sockets || sockets.size === 0;
       if (!sockets) {
@@ -84,6 +103,12 @@ serve<WSData>({
     async message(ws, message) {
       try {
         const data = JSON.parse(message as string) as WebSocketMessage;
+        ws.data.lastPongAt = Date.now();
+
+        if (data.type === "presence-pong") {
+          void touchLastSeen([ws.data.userId]);
+          return;
+        }
 
         if (
           ["offer", "answer", "ice-candidate", "hangup"].includes(data.type)

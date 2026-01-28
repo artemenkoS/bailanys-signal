@@ -1,6 +1,7 @@
 export interface WSData {
   userId: string;
   roomId?: string;
+  lastPongAt?: number;
 }
 
 export interface RegisterRequest {
