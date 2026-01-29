@@ -1,7 +1,7 @@
 import type { LoginRequest, RegisterRequest } from "./types";
 import { errorResponse, getBearerToken, jsonResponse } from "./http";
 import { supabase, validateToken } from "./supabase";
-import { PRESENCE_TTL_MS } from "./presence";
+import { users } from "./state";
 
 export type RouteHandler = (req: Request) => Promise<Response>;
 
@@ -55,15 +55,14 @@ export const routes: Record<string, RouteHandler> = {
     const userId = token ? await validateToken(token) : null;
     if (!userId) return errorResponse("Unauthorized", 401);
 
-    const presenceThreshold = new Date(
-      Date.now() - PRESENCE_TTL_MS,
-    ).toISOString();
-    const { data } = await supabase
+    const onlineIds = Array.from(users.keys()).filter((id) => id !== userId);
+    if (onlineIds.length === 0) return jsonResponse({ users: [] });
+
+    const { data, error } = await supabase
       .from("profiles")
       .select("id, username, display_name, status, avatar_url")
-      .eq("status", "online")
-      .gt("last_seen", presenceThreshold)
-      .neq("id", userId);
+      .in("id", onlineIds);
+    if (error) return errorResponse(error.message, 500);
     return jsonResponse({ users: data || [] });
   },
 };
