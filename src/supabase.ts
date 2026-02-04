@@ -2,8 +2,27 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || supabaseServiceKey;
 
-export const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const clientOptions = {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
+  },
+};
+
+export const supabase = createClient(
+  supabaseUrl,
+  supabaseServiceKey,
+  clientOptions,
+);
+
+export const supabaseAuth = createClient(
+  supabaseUrl,
+  supabaseAnonKey,
+  clientOptions,
+);
 
 export async function validateToken(token: string): Promise<string | null> {
   console.log("[Auth] Проверка токена...");
@@ -11,7 +30,7 @@ export async function validateToken(token: string): Promise<string | null> {
     const {
       data: { user },
       error,
-    } = await supabase.auth.getUser(token);
+    } = await supabaseAuth.auth.getUser(token);
     if (error) {
       console.error("[Auth] Ошибка Supabase:", error.message);
       return null;

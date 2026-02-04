@@ -26,3 +26,21 @@ export interface WebSocketMessage {
   duration?: number;
   [key: string]: any;
 }
+
+export type CallDirection = "incoming" | "outgoing";
+export type CallHistoryStatus =
+  | "completed"
+  | "missed"
+  | "rejected"
+  | "failed";
+export type CallKind = "audio" | "video";
+
+export interface CreateCallHistoryRequest {
+  peerId: string;
+  direction: CallDirection;
+  status: CallHistoryStatus;
+  durationSeconds: number;
+  callType?: CallKind;
+  startedAt?: string;
+  endedAt?: string;
+}
