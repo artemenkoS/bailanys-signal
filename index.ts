@@ -4,7 +4,7 @@ import type { WebSocketMessage, WSData } from "./src/types";
 import { routes } from "./src/routes";
 import { errorResponse, withCors } from "./src/http";
 import { setPresence, touchLastSeen, validateToken } from "./src/supabase";
-import { users } from "./src/state";
+import { users, activeCalls } from "./src/state";
 import { broadcast, sendJson, sendToUser } from "./src/ws";
 import {
   handleJoinRoom,
@@ -25,6 +25,19 @@ const tls =
     ? { cert: Bun.file(certPath), key: Bun.file(keyPath) }
     : undefined;
 const WS_OPEN_STATE = 1;
+type PresenceStatus = "online" | "offline" | "in-call";
+
+const getConnectionCount = (userId: string) => users.get(userId)?.size ?? 0;
+
+const resolvePresenceStatus = (userId: string): PresenceStatus => {
+  if (activeCalls.has(userId)) return "in-call";
+  return getConnectionCount(userId) > 0 ? "online" : "offline";
+};
+
+const updateUserStatus = async (userId: string, status: PresenceStatus) => {
+  await setPresence(userId, status);
+  broadcast({ type: "user-status", userId, status });
+};
 
 if (shouldAttemptTls && !hasTlsFiles) {
   console.warn(
@@ -94,7 +107,8 @@ serve<WSData>({
       sockets.add(ws);
 
       if (isFirstConnection) {
-        await setPresence(userId, "online");
+        const status = resolvePresenceStatus(userId);
+        await updateUserStatus(userId, status);
         broadcast({ type: "user-connected", userId }, userId);
       }
       console.log(`[WSS] Connected: ${userId}`);
@@ -113,8 +127,43 @@ serve<WSData>({
         if (
           ["offer", "answer", "ice-candidate", "hangup"].includes(data.type)
         ) {
-          console.log(`[WSS] Signaling: ${data.type} to ${data.to}`);
-          sendToUser(data.to!, { ...data, from: ws.data.userId });
+          const from = ws.data.userId;
+          const to = data.to;
+          if (!to) return;
+
+          if (data.type === "offer") {
+            if (activeCalls.has(to) || activeCalls.has(from)) {
+              sendToUser(from, {
+                type: "hangup",
+                from: to,
+                reason: "rejected",
+              });
+              return;
+            }
+          }
+
+          if (data.type === "answer") {
+            activeCalls.set(from, to);
+            activeCalls.set(to, from);
+            void updateUserStatus(from, "in-call");
+            void updateUserStatus(to, "in-call");
+          }
+
+          if (data.type === "hangup") {
+            const peerId = activeCalls.get(from) ?? to;
+            activeCalls.delete(from);
+            if (peerId) activeCalls.delete(peerId);
+
+            const fromStatus = resolvePresenceStatus(from);
+            void updateUserStatus(from, fromStatus);
+            if (peerId) {
+              const peerStatus = resolvePresenceStatus(peerId);
+              void updateUserStatus(peerId, peerStatus);
+            }
+          }
+
+          console.log(`[WSS] Signaling: ${data.type} to ${to}`);
+          sendToUser(to, { ...data, from });
           return;
         }
 
@@ -148,7 +197,19 @@ serve<WSData>({
       const isLastConnection = !sockets || sockets.size === 0;
       if (isLastConnection) {
         removeUserFromRooms(userId);
-        await setPresence(userId, "offline");
+        const peerId = activeCalls.get(userId);
+        if (peerId) {
+          activeCalls.delete(userId);
+          activeCalls.delete(peerId);
+          const peerStatus = resolvePresenceStatus(peerId);
+          void updateUserStatus(peerId, peerStatus);
+          sendToUser(peerId, {
+            type: "hangup",
+            from: userId,
+            reason: "ended",
+          });
+        }
+        await updateUserStatus(userId, "offline");
         broadcast({ type: "user-disconnected", userId }, userId);
       }
       console.log(`[WSS] Disconnected: ${userId}`);

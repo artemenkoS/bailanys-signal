@@ -3,6 +3,7 @@ import type { CallDirection, CallHistoryStatus, CallKind, WSData } from "./types
 
 export const users = new Map<string, Set<ServerWebSocket<WSData>>>();
 export const rooms = new Map<string, Set<string>>();
+export const activeCalls = new Map<string, string>();
 
 export interface InMemoryCallLog {
   id: string;

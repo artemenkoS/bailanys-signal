@@ -44,7 +44,7 @@ export async function validateToken(token: string): Promise<string | null> {
 
 export async function setPresence(
   userId: string,
-  status: "online" | "offline",
+  status: "online" | "offline" | "in-call",
 ) {
   const { error } = await supabase
     .from("profiles")
