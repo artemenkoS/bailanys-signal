@@ -16,6 +16,11 @@ export interface LoginRequest {
   password: string;
 }
 
+export interface UpdateProfileRequest {
+  username?: string;
+  displayName?: string | null;
+}
+
 export interface WebSocketMessage {
   type: string;
   roomId?: string;

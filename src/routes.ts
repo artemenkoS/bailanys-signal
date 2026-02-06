@@ -5,10 +5,17 @@ import type {
   CreateCallHistoryRequest,
   LoginRequest,
   RegisterRequest,
+  UpdateProfileRequest,
 } from "./types";
 import { errorResponse, getBearerToken, jsonResponse } from "./http";
 import { supabase, supabaseAuth, validateToken } from "./supabase";
 import { callHistoryByUser, users } from "./state";
+import {
+  deleteAvatarByUrl,
+  normalizeAvatarUrl,
+  processAvatarImage,
+  uploadAvatar,
+} from "./storage";
 
 export type RouteHandler = (req: Request) => Promise<Response>;
 
@@ -22,6 +29,7 @@ const allowedCallStatuses = new Set<CallHistoryStatus>([
 ]);
 const allowedCallTypes = new Set<CallKind>(["audio", "video"]);
 const MISSING_TABLE_ERROR_CODE = "42P01";
+const USERNAME_MIN_LENGTH = 4;
 
 function parseDate(value?: string): string | null {
   if (!value) return null;
@@ -81,6 +89,184 @@ async function attachPeers(
 }
 
 export const routes: Record<string, RouteHandler> = {
+  "/api/profile": async (req: Request) => {
+    const token = getBearerToken(req);
+    const userId = token ? await validateToken(token) : null;
+    if (!userId) return errorResponse("Unauthorized", 401);
+
+    if (req.method === "GET") {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id, username, display_name, avatar_url, status, last_seen")
+        .eq("id", userId)
+        .single();
+      if (error) return errorResponse(error.message, 500);
+      if (data?.avatar_url) {
+        const normalized = normalizeAvatarUrl(data.avatar_url);
+        if (normalized && normalized !== data.avatar_url) {
+          const { error: updateError } = await supabase
+            .from("profiles")
+            .update({ avatar_url: normalized })
+            .eq("id", userId);
+          if (!updateError) {
+            data.avatar_url = normalized;
+          }
+        }
+      }
+      return jsonResponse({ profile: data });
+    }
+
+    if (req.method === "PATCH") {
+      try {
+        const contentType = req.headers.get("content-type") ?? "";
+        const isMultipart = contentType.includes("multipart/form-data");
+        const updates: Record<string, string | null> = {};
+        let avatarUrl: string | null | undefined = undefined;
+
+        if (isMultipart) {
+          const form = await req.formData();
+          const usernameValue = form.get("username");
+          const displayNameValue = form.get("displayName");
+          const removeAvatarValue = form.get("removeAvatar");
+          const avatarValue = form.get("avatar");
+          let currentAvatarUrl: string | null = null;
+
+          if (typeof usernameValue === "string") {
+            const username = usernameValue.trim();
+            if (!username) return errorResponse("Username is required", 400);
+            if (username.length < USERNAME_MIN_LENGTH) {
+              return errorResponse("Username too short", 400);
+            }
+            updates.username = username;
+          }
+
+          if (displayNameValue !== null && displayNameValue !== undefined) {
+            const displayName = String(displayNameValue).trim();
+            updates.display_name = displayName.length > 0 ? displayName : null;
+          }
+
+          const removeAvatar =
+            typeof removeAvatarValue === "string" &&
+            removeAvatarValue.toLowerCase() === "true";
+
+          if (avatarValue instanceof Blob || removeAvatar) {
+            const { data: currentProfile, error: currentError } = await supabase
+              .from("profiles")
+              .select("avatar_url")
+              .eq("id", userId)
+              .single();
+            if (currentError) {
+              return errorResponse(currentError.message, 500);
+            }
+            currentAvatarUrl = normalizeAvatarUrl(currentProfile?.avatar_url);
+          }
+
+          if (avatarValue && avatarValue instanceof Blob) {
+            if (!avatarValue.type.startsWith("image/")) {
+              return errorResponse("Avatar must be an image", 400);
+            }
+            const buffer = Buffer.from(await avatarValue.arrayBuffer());
+            try {
+              const processed = await processAvatarImage(buffer);
+              const uploadResult = await uploadAvatar(
+                userId,
+                processed.buffer,
+                processed.contentType,
+              );
+              avatarUrl = uploadResult.url;
+              if (currentAvatarUrl) {
+                deleteAvatarByUrl(currentAvatarUrl).catch((error) => {
+                  console.error("[Avatar] Old avatar delete failed:", error);
+                });
+              }
+            } catch (error: any) {
+              return errorResponse(
+                error?.message ?? "Avatar processing failed",
+                400,
+              );
+            }
+          } else if (avatarValue) {
+            return errorResponse("Invalid avatar file", 400);
+          } else if (removeAvatar) {
+            if (currentAvatarUrl) {
+              deleteAvatarByUrl(currentAvatarUrl).catch((error) => {
+                console.error("[Avatar] Old avatar delete failed:", error);
+              });
+            }
+            avatarUrl = null;
+          }
+        } else {
+          const body = (await req.json()) as UpdateProfileRequest;
+
+          if (body.username !== undefined) {
+            const username = body.username.trim();
+            if (!username) return errorResponse("Username is required", 400);
+            if (username.length < USERNAME_MIN_LENGTH) {
+              return errorResponse("Username too short", 400);
+            }
+            updates.username = username;
+          }
+
+          if (body.displayName !== undefined) {
+            const displayName = (body.displayName ?? "").trim();
+            updates.display_name = displayName.length > 0 ? displayName : null;
+          }
+        }
+
+        if (avatarUrl !== undefined) {
+          updates.avatar_url = avatarUrl;
+        }
+
+        if (Object.keys(updates).length === 0) {
+          return errorResponse("No fields to update", 400);
+        }
+
+        if (updates.username) {
+          const { data: existing, error: existingError } = await supabase
+            .from("profiles")
+            .select("id")
+            .eq("username", updates.username)
+            .neq("id", userId)
+            .maybeSingle();
+          if (existingError) {
+            return errorResponse(existingError.message, 500);
+          }
+          if (existing) return errorResponse("Username taken", 409);
+        }
+
+        const { data: profile, error } = await supabase
+          .from("profiles")
+          .update(updates)
+          .eq("id", userId)
+          .select("id, username, display_name, avatar_url, status, last_seen")
+          .single();
+        if (error) return errorResponse(error.message, 500);
+
+        const metadataUpdate: Record<string, string> = {};
+        if (updates.username) metadataUpdate.username = updates.username;
+        if ("display_name" in updates) {
+          metadataUpdate.display_name = updates.display_name ?? "";
+        }
+        if (Object.keys(metadataUpdate).length > 0) {
+          const { error: authError } =
+            await supabase.auth.admin.updateUserById(userId, {
+              user_metadata: metadataUpdate,
+            });
+          if (authError) {
+            console.error("[Auth] Metadata update failed:", authError.message);
+          }
+        }
+
+        return jsonResponse({ profile });
+      } catch (err: any) {
+        const status = err instanceof SyntaxError ? 400 : 500;
+        return errorResponse(err?.message ?? "Invalid request body", status);
+      }
+    }
+
+    return errorResponse("Method not allowed", 405);
+  },
+
   "/api/register": async (req: Request) => {
     try {
       const body = (await req.json()) as RegisterRequest;
@@ -138,7 +324,11 @@ export const routes: Record<string, RouteHandler> = {
       .select("id, username, display_name, status, avatar_url")
       .in("id", onlineIds);
     if (error) return errorResponse(error.message, 500);
-    return jsonResponse({ users: data || [] });
+    const normalizedUsers = (data || []).map((user) => ({
+      ...user,
+      avatar_url: normalizeAvatarUrl(user.avatar_url),
+    }));
+    return jsonResponse({ users: normalizedUsers });
   },
 
   "/api/call-history": async (req: Request) => {
