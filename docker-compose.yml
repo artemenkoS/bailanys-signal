@@ -9,6 +9,10 @@ services:
       PORT: 8080
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      TURN_URLS: ${TURN_URLS}
+      TURN_SECRET: ${TURN_SECRET}
+      TURN_TTL_SECONDS: ${TURN_TTL_SECONDS}
+      TURN_USER_PREFIX: ${TURN_USER_PREFIX}
     networks:
       - webrtc-network
     expose:

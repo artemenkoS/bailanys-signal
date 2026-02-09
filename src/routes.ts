@@ -8,6 +8,7 @@ import type {
   RegisterRequest,
   UpdateProfileRequest,
 } from "./types";
+import { createHmac } from "node:crypto";
 import { errorResponse, getBearerToken, jsonResponse } from "./http";
 import { supabase, supabaseAuth, validateToken } from "./supabase";
 import { callHistoryByUser, rooms, users } from "./state";
@@ -34,6 +35,75 @@ const allowedCallTypes = new Set<CallKind>(["audio", "video"]);
 const MISSING_TABLE_ERROR_CODE = "42P01";
 const MISSING_COLUMN_ERROR_CODE = "42703";
 const USERNAME_MIN_LENGTH = 4;
+const DEFAULT_TURN_TTL_SECONDS = 600;
+
+type IceServer = {
+  urls: string[];
+  username?: string;
+  credential?: string;
+};
+
+const parseUrls = (value?: string | null) =>
+  (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+const TURN_URLS = parseUrls(process.env.TURN_URLS ?? process.env.TURN_URL);
+const STUN_URLS = parseUrls(process.env.STUN_URLS ?? process.env.STUN_URL);
+const TURN_USERNAME = process.env.TURN_USERNAME ?? "";
+const TURN_CREDENTIAL = process.env.TURN_CREDENTIAL ?? "";
+const TURN_SECRET = process.env.TURN_SECRET ?? "";
+const TURN_TTL_SECONDS = Number.parseInt(
+  process.env.TURN_TTL_SECONDS ?? String(DEFAULT_TURN_TTL_SECONDS),
+  10,
+);
+const TURN_USER_PREFIX = process.env.TURN_USER_PREFIX ?? "";
+
+const resolveTurnTtlSeconds = () => {
+  if (Number.isFinite(TURN_TTL_SECONDS) && TURN_TTL_SECONDS > 0) {
+    return TURN_TTL_SECONDS;
+  }
+  return DEFAULT_TURN_TTL_SECONDS;
+};
+
+const buildIceServers = (userId: string) => {
+  const iceServers: IceServer[] = [];
+
+  if (STUN_URLS.length > 0) {
+    iceServers.push({ urls: STUN_URLS });
+  }
+
+  if (TURN_URLS.length > 0) {
+    if (TURN_SECRET) {
+      const ttlSeconds = resolveTurnTtlSeconds();
+      const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+      const username = `${expiresAt}:${TURN_USER_PREFIX}${userId}`;
+      const credential = createHmac("sha1", TURN_SECRET)
+        .update(username)
+        .digest("base64");
+      iceServers.push({ urls: TURN_URLS, username, credential });
+      return { iceServers, ttlSeconds };
+    }
+
+    if (TURN_USERNAME && TURN_CREDENTIAL) {
+      iceServers.push({
+        urls: TURN_URLS,
+        username: TURN_USERNAME,
+        credential: TURN_CREDENTIAL,
+      });
+      return { iceServers };
+    }
+
+    throw new Error("TURN credentials are not configured");
+  }
+
+  if (iceServers.length === 0) {
+    throw new Error("ICE servers are not configured");
+  }
+
+  return { iceServers };
+};
 
 function parseDate(value?: string): string | null {
   if (!value) return null;
@@ -271,6 +341,23 @@ export const routes: Record<string, RouteHandler> = {
     }
 
     return errorResponse("Method not allowed", 405);
+  },
+
+  "/api/ice-servers": async (req: Request) => {
+    const token = getBearerToken(req);
+    const userId = token ? await validateToken(token) : null;
+    if (!userId) return errorResponse("Unauthorized", 401);
+    if (req.method !== "GET") return errorResponse("Method not allowed", 405);
+
+    try {
+      const { iceServers, ttlSeconds } = buildIceServers(userId);
+      return jsonResponse({ iceServers, ttlSeconds });
+    } catch (error: any) {
+      return errorResponse(
+        error?.message ?? "ICE servers are not configured",
+        500,
+      );
+    }
   },
 
   "/api/register": async (req: Request) => {
