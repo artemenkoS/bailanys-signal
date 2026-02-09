@@ -4,11 +4,12 @@ import type { WebSocketMessage, WSData } from "./src/types";
 import { routes } from "./src/routes";
 import { errorResponse, withCors } from "./src/http";
 import { setPresence, touchLastSeen, validateToken } from "./src/supabase";
-import { users, activeCalls } from "./src/state";
+import { users, activeCalls, rooms } from "./src/state";
 import { broadcast, sendJson, sendToUser } from "./src/ws";
 import {
   handleJoinRoom,
   handleLeaveRoom,
+  isUserInAnyRoom,
   removeUserFromRooms,
 } from "./src/rooms";
 import { PRESENCE_HEARTBEAT_MS, PRESENCE_TTL_MS } from "./src/presence";
@@ -30,7 +31,7 @@ type PresenceStatus = "online" | "offline" | "in-call";
 const getConnectionCount = (userId: string) => users.get(userId)?.size ?? 0;
 
 const resolvePresenceStatus = (userId: string): PresenceStatus => {
-  if (activeCalls.has(userId)) return "in-call";
+  if (activeCalls.has(userId) || isUserInAnyRoom(userId)) return "in-call";
   return getConnectionCount(userId) > 0 ? "online" : "offline";
 };
 
@@ -132,7 +133,12 @@ serve<WSData>({
           if (!to) return;
 
           if (data.type === "offer") {
-            if (activeCalls.has(to) || activeCalls.has(from)) {
+            if (
+              activeCalls.has(to) ||
+              activeCalls.has(from) ||
+              isUserInAnyRoom(to) ||
+              isUserInAnyRoom(from)
+            ) {
               sendToUser(from, {
                 type: "hangup",
                 from: to,
@@ -167,12 +173,37 @@ serve<WSData>({
           return;
         }
 
+        if (["room-offer", "room-answer", "room-ice"].includes(data.type)) {
+          const from = ws.data.userId;
+          const to = data.to;
+          const roomId = data.roomId;
+          if (!to || !roomId) return;
+          const room = rooms.get(roomId);
+          if (!room || !room.has(from) || !room.has(to)) return;
+          sendToUser(to, { ...data, from });
+          return;
+        }
+
         switch (data.type) {
           case "join-room":
-            await handleJoinRoom(ws, data.roomId!);
+            if (!data.roomId) {
+              sendJson(ws, { type: "error", message: "Room not found" });
+              break;
+            }
+            await handleJoinRoom(ws, data.roomId, {
+              createIfMissing: Boolean(data.create),
+            });
+            void updateUserStatus(
+              ws.data.userId,
+              resolvePresenceStatus(ws.data.userId),
+            );
             break;
           case "leave-room":
             await handleLeaveRoom(ws);
+            void updateUserStatus(
+              ws.data.userId,
+              resolvePresenceStatus(ws.data.userId),
+            );
             break;
           case "start-call":
             sendToUser(data.receiverId!, {
@@ -196,7 +227,7 @@ serve<WSData>({
       }
       const isLastConnection = !sockets || sockets.size === 0;
       if (isLastConnection) {
-        removeUserFromRooms(userId);
+        await removeUserFromRooms(userId);
         const peerId = activeCalls.get(userId);
         if (peerId) {
           activeCalls.delete(userId);

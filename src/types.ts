@@ -29,6 +29,7 @@ export interface WebSocketMessage {
   receiverId?: string;
   callId?: string;
   duration?: number;
+  create?: boolean;
   [key: string]: any;
 }
 
