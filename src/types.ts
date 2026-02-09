@@ -16,6 +16,10 @@ export interface LoginRequest {
   password: string;
 }
 
+export interface RefreshRequest {
+  refreshToken: string;
+}
+
 export interface UpdateProfileRequest {
   username?: string;
   displayName?: string | null;

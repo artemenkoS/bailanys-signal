@@ -4,6 +4,7 @@ import type {
   CallKind,
   CreateCallHistoryRequest,
   LoginRequest,
+  RefreshRequest,
   RegisterRequest,
   UpdateProfileRequest,
 } from "./types";
@@ -310,6 +311,21 @@ export const routes: Record<string, RouteHandler> = {
       });
       if (error) return errorResponse(error.message, 401);
 
+      return jsonResponse(data);
+    } catch {
+      return errorResponse("Internal error", 500);
+    }
+  },
+
+  "/api/refresh": async (req: Request) => {
+    if (req.method !== "POST") return errorResponse("Method not allowed", 405);
+    try {
+      const { refreshToken } = (await req.json()) as RefreshRequest;
+      if (!refreshToken) return errorResponse("Missing refresh token", 400);
+      const { data, error } = await supabaseAuth.auth.refreshSession({
+        refresh_token: refreshToken,
+      });
+      if (error) return errorResponse(error.message, 401);
       return jsonResponse(data);
     } catch {
       return errorResponse("Internal error", 500);
