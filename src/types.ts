@@ -30,6 +30,9 @@ export interface WebSocketMessage {
   callId?: string;
   duration?: number;
   create?: boolean;
+  name?: string;
+  isPrivate?: boolean;
+  password?: string;
   [key: string]: any;
 }
 

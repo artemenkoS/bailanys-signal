@@ -36,6 +36,8 @@ const s3 = new S3Client({
 });
 
 const createAvatarKey = (userId: string) => `${userId}/${Date.now()}.webp`;
+const createRoomAvatarKey = (roomId: string) =>
+  `room-${roomId}/${Date.now()}.webp`;
 
 const buildPublicUrl = (key: string) => {
   if (!supabaseUrl || !bucket) return "";
@@ -98,6 +100,25 @@ export async function uploadAvatar(
 ) {
   assertStorageConfig();
   const key = createAvatarKey(userId);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+      CacheControl: "public, max-age=300",
+    }),
+  );
+  return { url: buildPublicUrl(key), key };
+}
+
+export async function uploadRoomAvatar(
+  roomId: string,
+  buffer: Buffer,
+  contentType: string,
+) {
+  assertStorageConfig();
+  const key = createRoomAvatarKey(roomId);
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,

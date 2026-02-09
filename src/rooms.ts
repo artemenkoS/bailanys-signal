@@ -5,16 +5,50 @@ import { rooms } from "./state";
 import { broadcastToRoom, sendJson } from "./ws";
 
 const MISSING_TABLE_ERROR_CODE = "42P01";
+const MISSING_COLUMN_ERROR_CODE = "42703";
 
 const nowIso = () => new Date().toISOString();
 
 const isMissingTableError = (error: any) =>
   Boolean(error && error.code === MISSING_TABLE_ERROR_CODE);
 
+const isMissingColumnError = (error: any) =>
+  Boolean(error && error.code === MISSING_COLUMN_ERROR_CODE);
+
+const normalizeRoomName = (name?: string | null) => {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return "";
+  return trimmed.length > 80 ? trimmed.slice(0, 80) : trimmed;
+};
+
+const hashRoomPassword = async (password?: string | null) => {
+  const value = password?.trim();
+  if (!value) return null;
+  try {
+    return await Bun.password.hash(value);
+  } catch (err) {
+    console.warn("[Rooms] Password hash failed:", err);
+    return null;
+  }
+};
+
+const verifyRoomPassword = async (password: string, hash: string) => {
+  try {
+    return await Bun.password.verify(password, hash);
+  } catch (err) {
+    console.warn("[Rooms] Password verify failed:", err);
+    return false;
+  }
+};
+
 const logRoomWarning = (context: string, error: any) => {
   if (!error) return;
   if (isMissingTableError(error)) {
     console.warn(`[Rooms] Table missing for ${context}, skipping.`);
+    return;
+  }
+  if (isMissingColumnError(error)) {
+    console.warn(`[Rooms] Column missing for ${context}, skipping.`);
     return;
   }
   console.warn(`[Rooms] ${context} failed:`, error.message ?? error);
@@ -24,11 +58,12 @@ const ensureRoomRecord = async (
   roomId: string,
   userId: string,
   createIfMissing: boolean,
+  options?: { name?: string; isPrivate?: boolean; password?: string },
 ) => {
   try {
     const { data: room, error } = await supabase
       .from("rooms")
-      .select("id, is_active, room_type, max_participants")
+      .select("*")
       .eq("id", roomId)
       .maybeSingle();
     if (error) {
@@ -37,24 +72,48 @@ const ensureRoomRecord = async (
     }
     if (!room) {
       if (!createIfMissing) return { room: null, allowed: false };
-      const { error: createError } = await supabase.from("rooms").insert({
+      const roomName = normalizeRoomName(options?.name);
+      if (!roomName) {
+        return { room: null, allowed: false, error: "name-required" };
+      }
+      const isPrivate = Boolean(options?.isPrivate);
+      if (isPrivate && !options?.password) {
+        return { room: null, allowed: false, error: "password-required" };
+      }
+      const passwordHash = isPrivate
+        ? await hashRoomPassword(options?.password)
+        : null;
+      if (isPrivate && !passwordHash) {
+        return { room: null, allowed: false, error: "password-hash-failed" };
+      }
+      const payload: Record<string, any> = {
         id: roomId,
-        name: roomId,
+        name: roomName,
         room_type: "group",
         created_by: userId,
         is_active: true,
         max_participants: null,
         updated_at: nowIso(),
-      });
-      logRoomWarning("create", createError);
-      return { room: null, allowed: true, created: true };
-    }
-    if (!room.is_active) {
-      const { error: updateError } = await supabase
+      };
+      if (isPrivate) {
+        payload.is_private = true;
+        payload.password_hash = passwordHash;
+      }
+      const { error: createError } = await supabase
         .from("rooms")
-        .update({ is_active: true, updated_at: nowIso() })
-        .eq("id", roomId);
-      logRoomWarning("activate", updateError);
+        .insert(payload);
+      if (createError) {
+        logRoomWarning("create", createError);
+        if (isMissingColumnError(createError)) {
+          return {
+            room: null,
+            allowed: false,
+            error: "privacy-unsupported",
+          };
+        }
+        return { room: null, allowed: false, error: "server" };
+      }
+      return { room: null, allowed: true, created: true };
     }
     return { room, allowed: true };
   } catch (err) {
@@ -117,7 +176,12 @@ const setRoomActive = async (roomId: string, isActive: boolean) => {
 export async function handleJoinRoom(
   ws: ServerWebSocket<WSData>,
   roomId: string,
-  options?: { createIfMissing?: boolean },
+  options?: {
+    createIfMissing?: boolean;
+    name?: string;
+    isPrivate?: boolean;
+    password?: string;
+  },
 ) {
   const { userId } = ws.data;
   if (ws.data.roomId && ws.data.roomId !== roomId) {
@@ -125,16 +189,72 @@ export async function handleJoinRoom(
   }
 
   const createIfMissing = options?.createIfMissing ?? false;
-  const roomResult = await ensureRoomRecord(roomId, userId, createIfMissing);
+  const roomResult = await ensureRoomRecord(roomId, userId, createIfMissing, {
+    name: options?.name,
+    isPrivate: options?.isPrivate,
+    password: options?.password,
+  });
   if (!roomResult.allowed) {
-    sendJson(ws, { type: "error", message: "Room not found" });
+    const errorMessage = (() => {
+      switch (roomResult.error) {
+        case "password-required":
+          return "Room password required";
+        case "password-hash-failed":
+          return "Room password required";
+        case "name-required":
+          return "Room name required";
+        case "privacy-unsupported":
+          return "Room privacy unsupported";
+        case "server":
+          return "Room error";
+        default:
+          return "Room not found";
+      }
+    })();
+    sendJson(ws, { type: "error", message: errorMessage });
     return;
+  }
+
+  if (roomResult.room && roomResult.room.is_active === false) {
+    if (roomResult.room.created_by !== userId) {
+      sendJson(ws, { type: "error", message: "Room inactive" });
+      return;
+    }
+    await setRoomActive(roomId, true);
+  }
+
+  const maxParticipants = Number(roomResult.room?.max_participants);
+  if (Number.isFinite(maxParticipants) && maxParticipants > 0) {
+    const currentSize = rooms.get(roomId)?.size ?? 0;
+    if (currentSize >= maxParticipants) {
+      sendJson(ws, { type: "error", message: "Room is full" });
+      return;
+    }
+  }
+
+  if (roomResult.room?.is_private) {
+    const password = options?.password?.trim() ?? "";
+    if (!password) {
+      sendJson(ws, { type: "error", message: "Room password required" });
+      return;
+    }
+    const passwordHash = roomResult.room?.password_hash;
+    if (!passwordHash) {
+      sendJson(ws, { type: "error", message: "Invalid room password" });
+      return;
+    }
+    const ok = await verifyRoomPassword(password, passwordHash);
+    if (!ok) {
+      sendJson(ws, { type: "error", message: "Invalid room password" });
+      return;
+    }
   }
 
   ws.data.roomId = roomId;
   if (!rooms.has(roomId)) rooms.set(roomId, new Set());
   rooms.get(roomId)!.add(userId);
   await upsertParticipantJoin(roomId, userId);
+  await setRoomActive(roomId, true);
 
   sendJson(ws, {
     type: "room-joined",

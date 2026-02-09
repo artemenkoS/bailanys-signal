@@ -192,6 +192,9 @@ serve<WSData>({
             }
             await handleJoinRoom(ws, data.roomId, {
               createIfMissing: Boolean(data.create),
+              name: data.name,
+              isPrivate: data.isPrivate,
+              password: data.password,
             });
             void updateUserStatus(
               ws.data.userId,
