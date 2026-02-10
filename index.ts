@@ -70,26 +70,26 @@ serve<WSData>({
 
   async fetch(req, server) {
     const url = new URL(req.url);
-    if (req.method === "OPTIONS") return withCors(new Response(null));
+    if (req.method === "OPTIONS") return withCors(new Response(null), req);
 
     if (url.pathname === "/ws") {
       const token = url.searchParams.get("token");
       const userId = token ? await validateToken(token) : null;
-      if (!userId) return withCors(errorResponse("Unauthorized", 401));
+      if (!userId) return withCors(errorResponse("Unauthorized", 401), req);
 
       const upgraded = server.upgrade(req, { data: { userId } });
       return upgraded
         ? undefined
-        : withCors(errorResponse("Upgrade failed", 500));
+        : withCors(errorResponse("Upgrade failed", 500), req);
     }
 
     const handler = routes[url.pathname];
     if (handler) {
       const res = await handler(req);
-      return withCors(res);
+      return withCors(res, req);
     }
 
-    return withCors(errorResponse("Not found", 404));
+    return withCors(errorResponse("Not found", 404), req);
   },
 
   websocket: {

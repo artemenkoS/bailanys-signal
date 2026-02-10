@@ -1,15 +1,28 @@
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+const defaultOrigins = ["https://serezha.kz", "https://www.serezha.kz"];
+const allowedOrigins = (process.env.CORS_ORIGINS ?? defaultOrigins.join(","))
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const corsHeadersBase = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PATCH, DELETE, PUT",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  Vary: "Origin",
 };
 
 const jsonHeaders = {
   "Content-Type": "application/json",
 };
 
-export function withCors(response: Response): Response {
-  Object.entries(corsHeaders).forEach(([key, value]) =>
+const resolveCorsOrigin = (origin: string | null): string => {
+  if (origin && allowedOrigins.includes(origin)) return origin;
+  return allowedOrigins[0] ?? "*";
+};
+
+export function withCors(response: Response, req?: Request): Response {
+  const origin = req?.headers.get("Origin") ?? null;
+  response.headers.set("Access-Control-Allow-Origin", resolveCorsOrigin(origin));
+  Object.entries(corsHeadersBase).forEach(([key, value]) =>
     response.headers.set(key, value),
   );
   return response;
