@@ -49,7 +49,8 @@ export type CallHistoryStatus =
 export type CallKind = "audio" | "video";
 
 export interface CreateCallHistoryRequest {
-  peerId: string;
+  peerId?: string;
+  roomId?: string;
   direction: CallDirection;
   status: CallHistoryStatus;
   durationSeconds: number;

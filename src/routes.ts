@@ -133,7 +133,8 @@ const nowIso = () => new Date().toISOString();
 async function attachPeers(
   calls: Array<{
     id: string;
-    peer_id: string;
+    peer_id: string | null;
+    room_id?: string | null;
     direction: CallDirection;
     status: CallHistoryStatus;
     duration_seconds: number;
@@ -143,7 +144,7 @@ async function attachPeers(
   }>,
 ) {
   const peerIds = Array.from(
-    new Set(calls.map((call) => call.peer_id).filter(Boolean)),
+    new Set(calls.map((call) => call.peer_id).filter(Boolean) as string[]),
   );
   const peersById = new Map<string, any>();
 
@@ -161,6 +162,45 @@ async function attachPeers(
   return calls.map((call) => ({
     ...call,
     peer: call.peer_id ? peersById.get(call.peer_id) ?? null : null,
+  }));
+}
+
+async function attachRooms(
+  calls: Array<{
+    id: string;
+    peer_id: string | null;
+    room_id?: string | null;
+    direction: CallDirection;
+    status: CallHistoryStatus;
+    duration_seconds: number;
+    call_type: CallKind;
+    started_at: string;
+    ended_at: string | null;
+    peer?: any;
+  }>,
+) {
+  const roomIds = Array.from(
+    new Set(calls.map((call) => call.room_id).filter(Boolean) as string[]),
+  );
+  const roomsById = new Map<string, any>();
+
+  if (roomIds.length > 0) {
+    const { data: roomsData, error: roomsError } = await supabase
+      .from("rooms")
+      .select("id, name, avatar_url")
+      .in("id", roomIds);
+    if (roomsError) throw roomsError;
+    for (const room of roomsData || []) {
+      roomsById.set(room.id, {
+        ...room,
+        avatar_url: normalizeAvatarUrl(room.avatar_url),
+      });
+    }
+  }
+
+  return calls.map((call) => ({
+    ...call,
+    room: call.room_id ? roomsById.get(call.room_id) ?? null : null,
   }));
 }
 
@@ -723,20 +763,34 @@ export const routes: Record<string, RouteHandler> = {
     if (!userId) return errorResponse("Unauthorized", 401);
 
     if (req.method === "GET") {
-      const { data: calls, error } = await supabase
+      let calls: any[] | null = null;
+      let error: any = null;
+
+      ({ data: calls, error } = await supabase
         .from("call_history")
         .select(
-          "id, caller_id, receiver_id, status, duration, call_type, started_at, ended_at",
+          "id, caller_id, receiver_id, room_id, status, duration, call_type, started_at, ended_at",
         )
         .or(`caller_id.eq.${userId},receiver_id.eq.${userId}`)
         .order("started_at", { ascending: false })
-        .limit(CALL_HISTORY_LIMIT);
+        .limit(CALL_HISTORY_LIMIT));
+
+      if (error?.code === MISSING_COLUMN_ERROR_CODE) {
+        ({ data: calls, error } = await supabase
+          .from("call_history")
+          .select(
+            "id, caller_id, receiver_id, status, duration, call_type, started_at, ended_at",
+          )
+          .or(`caller_id.eq.${userId},receiver_id.eq.${userId}`)
+          .order("started_at", { ascending: false })
+          .limit(CALL_HISTORY_LIMIT));
+      }
 
       if (error) {
         if (error.code === MISSING_TABLE_ERROR_CODE) {
           try {
             const fallbackCalls = callHistoryByUser.get(userId) || [];
-            const normalizedCalls = await attachPeers(fallbackCalls);
+            const normalizedCalls = await attachRooms(await attachPeers(fallbackCalls));
             return jsonResponse({ calls: normalizedCalls });
           } catch (fallbackError: any) {
             return errorResponse(fallbackError.message, 500);
@@ -746,35 +800,50 @@ export const routes: Record<string, RouteHandler> = {
       }
 
       try {
-        const normalizedCalls = await attachPeers(
-          (calls || [])
-            .map((call) => {
-              const isOutgoing = call.caller_id === userId;
-              const peerId = isOutgoing ? call.receiver_id : call.caller_id;
-              if (!peerId) return null;
+        const mappedCalls = (calls || [])
+          .map((call) => {
+            const roomId = (call as any).room_id ?? null;
+            const isRoomCall = Boolean(roomId);
+            const isOutgoing = call.caller_id === userId;
+            const peerId = isRoomCall
+              ? null
+              : (isOutgoing ? call.receiver_id : call.caller_id);
+            if (!isRoomCall && !peerId) return null;
 
-              return {
-                id: call.id,
-                peer_id: peerId,
-                direction: isOutgoing ? "outgoing" : "incoming",
-                status: normalizeCallStatus(call.status),
-                duration_seconds: call.duration ?? 0,
-                call_type: normalizeCallType(call.call_type),
-                started_at: call.started_at,
-                ended_at: call.ended_at,
-              };
-            })
-            .filter(Boolean) as Array<{
-            id: string;
-            peer_id: string;
-            direction: CallDirection;
-            status: CallHistoryStatus;
-            duration_seconds: number;
-            call_type: CallKind;
-            started_at: string;
-            ended_at: string | null;
-          }>,
-        );
+            return {
+              id: call.id,
+              peer_id: peerId,
+              room_id: roomId,
+              direction: isRoomCall ? "outgoing" : (isOutgoing ? "outgoing" : "incoming"),
+              status: normalizeCallStatus(call.status),
+              duration_seconds: call.duration ?? 0,
+              call_type: normalizeCallType(call.call_type),
+              started_at: call.started_at,
+              ended_at: call.ended_at,
+            };
+          })
+          .filter(Boolean) as Array<{
+          id: string;
+          peer_id: string | null;
+          room_id?: string | null;
+          direction: CallDirection;
+          status: CallHistoryStatus;
+          duration_seconds: number;
+          call_type: CallKind;
+          started_at: string;
+          ended_at: string | null;
+        }>;
+
+        const fallbackCalls = callHistoryByUser.get(userId) || [];
+        const combinedCalls = [...mappedCalls, ...fallbackCalls]
+          .sort((a, b) => {
+            const aTime = new Date(a.started_at).getTime();
+            const bTime = new Date(b.started_at).getTime();
+            return bTime - aTime;
+          })
+          .slice(0, CALL_HISTORY_LIMIT);
+
+        const normalizedCalls = await attachRooms(await attachPeers(combinedCalls));
         return jsonResponse({ calls: normalizedCalls });
       } catch (peerError: any) {
         return errorResponse(peerError.message, 500);
@@ -784,9 +853,21 @@ export const routes: Record<string, RouteHandler> = {
     if (req.method === "POST") {
       try {
         const body = (await req.json()) as CreateCallHistoryRequest;
-        if (!body.peerId) return errorResponse("peerId is required", 400);
+        const peerId = typeof body.peerId === "string" ? body.peerId.trim() : "";
+        const roomId = typeof body.roomId === "string" ? body.roomId.trim() : "";
+        const isRoomCall = Boolean(roomId);
+
+        if (!peerId && !roomId) {
+          return errorResponse("peerId or roomId is required", 400);
+        }
+        if (peerId && roomId) {
+          return errorResponse("peerId and roomId cannot both be set", 400);
+        }
         if (!allowedCallDirections.has(body.direction)) {
           return errorResponse("Invalid direction", 400);
+        }
+        if (isRoomCall && body.direction !== "outgoing") {
+          return errorResponse("Invalid direction for room call", 400);
         }
         if (!allowedCallStatuses.has(body.status)) {
           return errorResponse("Invalid status", 400);
@@ -799,11 +880,17 @@ export const routes: Record<string, RouteHandler> = {
           Math.floor(Number(body.durationSeconds) || 0),
         );
         const callType = normalizeCallType(body.callType);
-        const callerId = body.direction === "outgoing" ? userId : body.peerId;
-        const receiverId = body.direction === "outgoing" ? body.peerId : userId;
+        const callerId =
+          body.direction === "outgoing" ? userId : (peerId || userId);
+        const receiverId = isRoomCall
+          ? userId
+          : body.direction === "outgoing"
+            ? peerId
+            : userId;
         const fallbackLog = {
           id: crypto.randomUUID(),
-          peer_id: body.peerId,
+          peer_id: peerId || null,
+          room_id: roomId || null,
           direction: body.direction,
           status: body.status,
           duration_seconds: durationSeconds,
@@ -816,7 +903,7 @@ export const routes: Record<string, RouteHandler> = {
           return errorResponse("Invalid callType", 400);
         }
 
-        const { error } = await supabase.from("call_history").insert({
+        const insertPayload: Record<string, any> = {
           caller_id: callerId,
           receiver_id: receiverId,
           status: body.status,
@@ -824,10 +911,16 @@ export const routes: Record<string, RouteHandler> = {
           call_type: callType,
           started_at: startedAt ?? endedAt,
           ended_at: endedAt,
-        });
+        };
+        if (roomId) insertPayload.room_id = roomId;
+
+        const { error } = await supabase.from("call_history").insert(insertPayload);
 
         if (error) {
-          if (error.code === MISSING_TABLE_ERROR_CODE) {
+          if (
+            error.code === MISSING_TABLE_ERROR_CODE ||
+            (error.code === MISSING_COLUMN_ERROR_CODE && roomId)
+          ) {
             const existing = callHistoryByUser.get(userId) || [];
             existing.unshift(fallbackLog);
             callHistoryByUser.set(userId, existing.slice(0, CALL_HISTORY_LIMIT));

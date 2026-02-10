@@ -7,7 +7,8 @@ export const activeCalls = new Map<string, string>();
 
 export interface InMemoryCallLog {
   id: string;
-  peer_id: string;
+  peer_id: string | null;
+  room_id?: string | null;
   direction: CallDirection;
   status: CallHistoryStatus;
   duration_seconds: number;
