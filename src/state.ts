@@ -18,3 +18,13 @@ export interface InMemoryCallLog {
 }
 
 export const callHistoryByUser = new Map<string, InMemoryCallLog[]>();
+
+export interface InMemoryDirectMessage {
+  id: string;
+  sender_id: string;
+  receiver_id: string;
+  body: string;
+  created_at: string;
+}
+
+export const directMessagesByUser = new Map<string, InMemoryDirectMessage[]>();

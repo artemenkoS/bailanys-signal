@@ -20,6 +20,11 @@ export interface RefreshRequest {
   refreshToken: string;
 }
 
+export interface CreateDirectMessageRequest {
+  peerId: string;
+  body: string;
+}
+
 export interface UpdateProfileRequest {
   username?: string;
   displayName?: string | null;

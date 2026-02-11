@@ -3,6 +3,7 @@ import type {
   CallHistoryStatus,
   CallKind,
   CreateCallHistoryRequest,
+  CreateDirectMessageRequest,
   LoginRequest,
   RefreshRequest,
   RegisterRequest,
@@ -11,7 +12,7 @@ import type {
 import { createHmac } from 'node:crypto';
 import { errorResponse, getBearerToken, jsonResponse } from './http';
 import { supabase, supabaseAuth, validateToken } from './supabase';
-import { callHistoryByUser, rooms, users } from './state';
+import { callHistoryByUser, directMessagesByUser, rooms, users } from './state';
 import {
   deleteAvatarByUrl,
   extractAvatarKey,
@@ -20,10 +21,14 @@ import {
   uploadAvatar,
   uploadRoomAvatar,
 } from './storage';
+import { sendToUser } from './ws';
+import { decryptChatBody, encryptChatBody } from './chatCrypto';
 
 export type RouteHandler = (req: Request) => Promise<Response>;
 
 const CALL_HISTORY_LIMIT = 50;
+const DIRECT_MESSAGE_LIMIT = 100;
+const DIRECT_MESSAGE_MAX_LENGTH = 10000;
 const allowedCallDirections = new Set<CallDirection>(['incoming', 'outgoing']);
 const allowedCallStatuses = new Set<CallHistoryStatus>(['completed', 'missed', 'rejected', 'failed']);
 const allowedCallTypes = new Set<CallKind>(['audio', 'video']);
@@ -114,6 +119,37 @@ function normalizeCallType(value?: string): CallKind {
 }
 
 const nowIso = () => new Date().toISOString();
+
+type DirectMessage = {
+  id: string;
+  sender_id: string;
+  receiver_id: string;
+  body: string;
+  created_at: string;
+};
+
+const storeDirectMessageFallback = (message: DirectMessage) => {
+  const targets = [message.sender_id, message.receiver_id];
+  for (const userId of targets) {
+    const existing = directMessagesByUser.get(userId) || [];
+    existing.push(message);
+    if (existing.length > DIRECT_MESSAGE_LIMIT) {
+      existing.splice(0, existing.length - DIRECT_MESSAGE_LIMIT);
+    }
+    directMessagesByUser.set(userId, existing);
+  }
+};
+
+const getDirectMessagesFallback = (userId: string, peerId: string): DirectMessage[] => {
+  const existing = directMessagesByUser.get(userId) || [];
+  return existing
+    .filter(
+      (message) =>
+        (message.sender_id === userId && message.receiver_id === peerId) ||
+        (message.sender_id === peerId && message.receiver_id === userId),
+    )
+    .slice(-DIRECT_MESSAGE_LIMIT);
+};
 
 async function attachPeers(
   calls: Array<{
@@ -452,6 +488,33 @@ export const routes: Record<string, RouteHandler> = {
     return jsonResponse({ users: normalizedUsers });
   },
 
+  '/api/user': async (req: Request) => {
+    const token = getBearerToken(req);
+    const userId = token ? await validateToken(token) : null;
+    if (!userId) return errorResponse('Unauthorized', 401);
+    if (req.method !== 'GET') return errorResponse('Method not allowed', 405);
+
+    const url = new URL(req.url);
+    const targetId = url.searchParams.get('id')?.trim() ?? '';
+    if (!targetId) return errorResponse('id is required', 400);
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, username, display_name, avatar_url, status, last_seen')
+      .eq('id', targetId)
+      .single();
+
+    if (error) return errorResponse(error.message, 500);
+    if (!data) return errorResponse('User not found', 404);
+
+    return jsonResponse({
+      user: {
+        ...data,
+        avatar_url: normalizeAvatarUrl(data.avatar_url),
+      },
+    });
+  },
+
   '/api/rooms': async (req: Request) => {
     const token = getBearerToken(req);
     const userId = token ? await validateToken(token) : null;
@@ -734,6 +797,126 @@ export const routes: Record<string, RouteHandler> = {
       }));
 
       return jsonResponse({ rooms: normalizedRooms });
+    }
+
+    return errorResponse('Method not allowed', 405);
+  },
+
+  '/api/messages': async (req: Request) => {
+    const token = getBearerToken(req);
+    const userId = token ? await validateToken(token) : null;
+    if (!userId) return errorResponse('Unauthorized', 401);
+
+    const url = new URL(req.url);
+    if (req.method === 'GET') {
+      const peerId = url.searchParams.get('peerId')?.trim() ?? '';
+      if (!peerId) return errorResponse('peerId is required', 400);
+      if (peerId === userId) return errorResponse('Invalid peerId', 400);
+
+      let messages: DirectMessage[] | null = null;
+      let error: any = null;
+
+      ({ data: messages, error } = await supabase
+        .from('direct_messages')
+        .select('id, sender_id, receiver_id, body, created_at')
+        .or(`and(sender_id.eq.${userId},receiver_id.eq.${peerId}),and(sender_id.eq.${peerId},receiver_id.eq.${userId})`)
+        .order('created_at', { ascending: false })
+        .limit(DIRECT_MESSAGE_LIMIT));
+
+      if (error) {
+        if (error.code === MISSING_TABLE_ERROR_CODE || error.code === MISSING_COLUMN_ERROR_CODE) {
+          const fallbackMessages = getDirectMessagesFallback(userId, peerId);
+          try {
+            const decryptedFallback = fallbackMessages.map((message) => ({
+              ...message,
+              body: decryptChatBody(message.body),
+            }));
+            return jsonResponse({ messages: decryptedFallback });
+          } catch (decryptError: any) {
+            return errorResponse(decryptError?.message ?? 'Failed to decrypt messages', 500);
+          }
+        }
+        return errorResponse(error.message, 500);
+      }
+
+      try {
+        const normalized = (messages || [])
+          .slice()
+          .reverse()
+          .map((message) => ({
+            ...message,
+            body: decryptChatBody(message.body),
+          }));
+        return jsonResponse({ messages: normalized });
+      } catch (decryptError: any) {
+        return errorResponse(decryptError?.message ?? 'Failed to decrypt messages', 500);
+      }
+    }
+
+    if (req.method === 'POST') {
+      let body: CreateDirectMessageRequest;
+      try {
+        body = (await req.json()) as CreateDirectMessageRequest;
+      } catch {
+        return errorResponse('Invalid request body', 400);
+      }
+
+      try {
+        const peerId = typeof body.peerId === 'string' ? body.peerId.trim() : '';
+        const messageBody = typeof body.body === 'string' ? body.body.trim() : '';
+
+        if (!peerId) return errorResponse('peerId is required', 400);
+        if (peerId === userId) return errorResponse('Invalid peerId', 400);
+        if (!messageBody) return errorResponse('Message body is required', 400);
+        if (messageBody.length > DIRECT_MESSAGE_MAX_LENGTH) {
+          return errorResponse('Message is too long', 400);
+        }
+
+        const createdAt = nowIso();
+        const encryptedBody = encryptChatBody(messageBody);
+        const fallbackMessage: DirectMessage = {
+          id: crypto.randomUUID(),
+          sender_id: userId,
+          receiver_id: peerId,
+          body: encryptedBody,
+          created_at: createdAt,
+        };
+
+        const insertPayload = {
+          sender_id: userId,
+          receiver_id: peerId,
+          body: encryptedBody,
+          created_at: createdAt,
+        };
+
+        const { data, error } = await supabase
+          .from('direct_messages')
+          .insert(insertPayload)
+          .select('id, sender_id, receiver_id, body, created_at')
+          .single();
+
+        let storedMessage = fallbackMessage;
+        if (error) {
+          if (error.code === MISSING_TABLE_ERROR_CODE || error.code === MISSING_COLUMN_ERROR_CODE) {
+            storeDirectMessageFallback(fallbackMessage);
+          } else {
+            return errorResponse(error.message, 500);
+          }
+        } else if (data) {
+          storedMessage = data as DirectMessage;
+          storeDirectMessageFallback(storedMessage);
+        }
+
+        const responseMessage = {
+          ...storedMessage,
+          body: messageBody,
+        };
+        sendToUser(peerId, { type: 'chat-message', message: responseMessage });
+        sendToUser(userId, { type: 'chat-message', message: responseMessage });
+        return jsonResponse({ message: responseMessage }, 201);
+      } catch (err: any) {
+        return errorResponse(err?.message ?? 'Internal error', 500);
+      }
     }
 
     return errorResponse('Method not allowed', 405);
