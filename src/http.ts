@@ -8,6 +8,7 @@ const devOrigins = [
   "http://127.0.0.1:8080",
   "https://192.168.0.196:5556",
   "http://192.168.0.196:5556",
+  "https://172.20.10.11:5556",
 ];
 
 const allowedOrigins = (() => {
@@ -42,7 +43,10 @@ const resolveCorsOrigin = (origin: string | null): string => {
 
 export function withCors(response: Response, req?: Request): Response {
   const origin = req?.headers.get("Origin") ?? null;
-  response.headers.set("Access-Control-Allow-Origin", resolveCorsOrigin(origin));
+  response.headers.set(
+    "Access-Control-Allow-Origin",
+    resolveCorsOrigin(origin),
+  );
   Object.entries(corsHeadersBase).forEach(([key, value]) =>
     response.headers.set(key, value),
   );

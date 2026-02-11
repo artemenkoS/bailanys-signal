@@ -25,6 +25,15 @@ export interface CreateDirectMessageRequest {
   body: string;
 }
 
+export interface CreateContactRequest {
+  targetId: string;
+}
+
+export interface UpdateContactRequest {
+  requestId: string;
+  action: "accept" | "decline" | "cancel";
+}
+
 export interface UpdateProfileRequest {
   username?: string;
   displayName?: string | null;
