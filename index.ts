@@ -173,6 +173,15 @@ serve<WSData>({
           return;
         }
 
+        if (data.type === "typing") {
+          const from = ws.data.userId;
+          const to = typeof data.to === "string" ? data.to : "";
+          const isTyping = Boolean(data.isTyping);
+          if (!to) return;
+          sendToUser(to, { type: "typing", from, isTyping });
+          return;
+        }
+
         if (["room-offer", "room-answer", "room-ice"].includes(data.type)) {
           const from = ws.data.userId;
           const to = data.to;

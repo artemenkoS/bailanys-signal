@@ -126,13 +126,20 @@ type DirectMessage = {
   receiver_id: string;
   body: string;
   created_at: string;
+  edited_at?: string | null;
+  deleted_at?: string | null;
 };
 
 const storeDirectMessageFallback = (message: DirectMessage) => {
   const targets = [message.sender_id, message.receiver_id];
   for (const userId of targets) {
     const existing = directMessagesByUser.get(userId) || [];
-    existing.push(message);
+    const index = existing.findIndex((item) => item.id === message.id);
+    if (index >= 0) {
+      existing[index] = message;
+    } else {
+      existing.push(message);
+    }
     if (existing.length > DIRECT_MESSAGE_LIMIT) {
       existing.splice(0, existing.length - DIRECT_MESSAGE_LIMIT);
     }
@@ -149,6 +156,14 @@ const getDirectMessagesFallback = (userId: string, peerId: string): DirectMessag
         (message.sender_id === peerId && message.receiver_id === userId),
     )
     .slice(-DIRECT_MESSAGE_LIMIT);
+};
+
+const findDirectMessageFallback = (messageId: string): DirectMessage | null => {
+  for (const [, messages] of directMessagesByUser) {
+    const found = messages.find((message) => message.id === messageId);
+    if (found) return found;
+  }
+  return null;
 };
 
 async function attachPeers(
@@ -818,10 +833,21 @@ export const routes: Record<string, RouteHandler> = {
 
       ({ data: messages, error } = await supabase
         .from('direct_messages')
-        .select('id, sender_id, receiver_id, body, created_at')
+        .select('id, sender_id, receiver_id, body, created_at, edited_at, deleted_at')
         .or(`and(sender_id.eq.${userId},receiver_id.eq.${peerId}),and(sender_id.eq.${peerId},receiver_id.eq.${userId})`)
         .order('created_at', { ascending: false })
         .limit(DIRECT_MESSAGE_LIMIT));
+
+      if (error?.code === MISSING_COLUMN_ERROR_CODE) {
+        ({ data: messages, error } = await supabase
+          .from('direct_messages')
+          .select('id, sender_id, receiver_id, body, created_at')
+          .or(
+            `and(sender_id.eq.${userId},receiver_id.eq.${peerId}),and(sender_id.eq.${peerId},receiver_id.eq.${userId})`
+          )
+          .order('created_at', { ascending: false })
+          .limit(DIRECT_MESSAGE_LIMIT));
+      }
 
       if (error) {
         if (error.code === MISSING_TABLE_ERROR_CODE || error.code === MISSING_COLUMN_ERROR_CODE) {
@@ -830,6 +856,8 @@ export const routes: Record<string, RouteHandler> = {
             const decryptedFallback = fallbackMessages.map((message) => ({
               ...message,
               body: decryptChatBody(message.body),
+              edited_at: message.edited_at ?? null,
+              deleted_at: message.deleted_at ?? null,
             }));
             return jsonResponse({ messages: decryptedFallback });
           } catch (decryptError: any) {
@@ -846,6 +874,8 @@ export const routes: Record<string, RouteHandler> = {
           .map((message) => ({
             ...message,
             body: decryptChatBody(message.body),
+            edited_at: message.edited_at ?? null,
+            deleted_at: message.deleted_at ?? null,
           }));
         return jsonResponse({ messages: normalized });
       } catch (decryptError: any) {
@@ -880,6 +910,8 @@ export const routes: Record<string, RouteHandler> = {
           receiver_id: peerId,
           body: encryptedBody,
           created_at: createdAt,
+          edited_at: null,
+          deleted_at: null,
         };
 
         const insertPayload = {
@@ -889,11 +921,21 @@ export const routes: Record<string, RouteHandler> = {
           created_at: createdAt,
         };
 
-        const { data, error } = await supabase
+        let data: any = null;
+        let error: any = null;
+        ({ data, error } = await supabase
           .from('direct_messages')
           .insert(insertPayload)
-          .select('id, sender_id, receiver_id, body, created_at')
-          .single();
+          .select('id, sender_id, receiver_id, body, created_at, edited_at, deleted_at')
+          .single());
+
+        if (error?.code === MISSING_COLUMN_ERROR_CODE) {
+          ({ data, error } = await supabase
+            .from('direct_messages')
+            .insert(insertPayload)
+            .select('id, sender_id, receiver_id, body, created_at')
+            .single());
+        }
 
         let storedMessage = fallbackMessage;
         if (error) {
@@ -914,6 +956,162 @@ export const routes: Record<string, RouteHandler> = {
         sendToUser(peerId, { type: 'chat-message', message: responseMessage });
         sendToUser(userId, { type: 'chat-message', message: responseMessage });
         return jsonResponse({ message: responseMessage }, 201);
+      } catch (err: any) {
+        return errorResponse(err?.message ?? 'Internal error', 500);
+      }
+    }
+
+    if (req.method === 'PATCH') {
+      let body: { id?: string; body?: string };
+      try {
+        body = (await req.json()) as { id?: string; body?: string };
+      } catch {
+        return errorResponse('Invalid request body', 400);
+      }
+
+      try {
+        const messageId = typeof body.id === 'string' ? body.id.trim() : '';
+        const messageBody = typeof body.body === 'string' ? body.body.trim() : '';
+        if (!messageId) return errorResponse('id is required', 400);
+        if (!messageBody) return errorResponse('Message body is required', 400);
+        if (messageBody.length > DIRECT_MESSAGE_MAX_LENGTH) {
+          return errorResponse('Message is too long', 400);
+        }
+
+        const updatedAt = nowIso();
+        const encryptedBody = encryptChatBody(messageBody);
+        const updatePayload = {
+          body: encryptedBody,
+          edited_at: updatedAt,
+          deleted_at: null,
+        };
+
+        let data: any = null;
+        let error: any = null;
+        ({ data, error } = await supabase
+          .from('direct_messages')
+          .update(updatePayload)
+          .eq('id', messageId)
+          .eq('sender_id', userId)
+          .select('id, sender_id, receiver_id, body, created_at, edited_at, deleted_at')
+          .single());
+
+        if (error?.code === MISSING_COLUMN_ERROR_CODE) {
+          ({ data, error } = await supabase
+            .from('direct_messages')
+            .update({ body: encryptedBody })
+            .eq('id', messageId)
+            .eq('sender_id', userId)
+            .select('id, sender_id, receiver_id, body, created_at')
+            .single());
+        }
+
+        if (error) {
+          if (error.code === MISSING_TABLE_ERROR_CODE) {
+            const existing = findDirectMessageFallback(messageId);
+            if (!existing || existing.sender_id !== userId) {
+              return errorResponse('Message not found', 404);
+            }
+            const updatedMessage: DirectMessage = {
+              ...existing,
+              body: encryptedBody,
+              edited_at: updatedAt,
+              deleted_at: null,
+            };
+            storeDirectMessageFallback(updatedMessage);
+            const responseMessage = {
+              ...updatedMessage,
+              body: messageBody,
+            };
+            sendToUser(existing.receiver_id, { type: 'chat-message', message: responseMessage });
+            sendToUser(userId, { type: 'chat-message', message: responseMessage });
+            return jsonResponse({ message: responseMessage }, 200);
+          }
+          return errorResponse(error.message, 500);
+        }
+
+        if (!data) return errorResponse('Message not found', 404);
+        const storedMessage = data as DirectMessage;
+        const responseMessage = {
+          ...storedMessage,
+          body: messageBody,
+        };
+        storeDirectMessageFallback(storedMessage);
+        sendToUser(storedMessage.receiver_id, { type: 'chat-message', message: responseMessage });
+        sendToUser(userId, { type: 'chat-message', message: responseMessage });
+        return jsonResponse({ message: responseMessage }, 200);
+      } catch (err: any) {
+        return errorResponse(err?.message ?? 'Internal error', 500);
+      }
+    }
+
+    if (req.method === 'DELETE') {
+      const url = new URL(req.url);
+      const messageId = url.searchParams.get('id')?.trim() ?? '';
+      if (!messageId) return errorResponse('id is required', 400);
+      try {
+        const deletedAt = nowIso();
+        const encryptedBody = encryptChatBody('');
+        const updatePayload = {
+          body: encryptedBody,
+          deleted_at: deletedAt,
+          edited_at: null,
+        };
+
+        let data: any = null;
+        let error: any = null;
+        ({ data, error } = await supabase
+          .from('direct_messages')
+          .update(updatePayload)
+          .eq('id', messageId)
+          .eq('sender_id', userId)
+          .select('id, sender_id, receiver_id, body, created_at, edited_at, deleted_at')
+          .single());
+
+        if (error?.code === MISSING_COLUMN_ERROR_CODE) {
+          ({ data, error } = await supabase
+            .from('direct_messages')
+            .update({ body: encryptedBody })
+            .eq('id', messageId)
+            .eq('sender_id', userId)
+            .select('id, sender_id, receiver_id, body, created_at')
+            .single());
+        }
+
+        if (error) {
+          if (error.code === MISSING_TABLE_ERROR_CODE) {
+            const existing = findDirectMessageFallback(messageId);
+            if (!existing || existing.sender_id !== userId) {
+              return errorResponse('Message not found', 404);
+            }
+            const deletedMessage: DirectMessage = {
+              ...existing,
+              body: encryptedBody,
+              deleted_at: deletedAt,
+              edited_at: null,
+            };
+            storeDirectMessageFallback(deletedMessage);
+            const responseMessage = {
+              ...deletedMessage,
+              body: '',
+            };
+            sendToUser(existing.receiver_id, { type: 'chat-message', message: responseMessage });
+            sendToUser(userId, { type: 'chat-message', message: responseMessage });
+            return jsonResponse({ message: responseMessage }, 200);
+          }
+          return errorResponse(error.message, 500);
+        }
+
+        if (!data) return errorResponse('Message not found', 404);
+        const storedMessage = data as DirectMessage;
+        const responseMessage = {
+          ...storedMessage,
+          body: '',
+        };
+        storeDirectMessageFallback(storedMessage);
+        sendToUser(storedMessage.receiver_id, { type: 'chat-message', message: responseMessage });
+        sendToUser(userId, { type: 'chat-message', message: responseMessage });
+        return jsonResponse({ message: responseMessage }, 200);
       } catch (err: any) {
         return errorResponse(err?.message ?? 'Internal error', 500);
       }
