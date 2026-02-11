@@ -1,8 +1,29 @@
 const defaultOrigins = ["https://serezha.kz", "https://www.serezha.kz"];
-const allowedOrigins = (process.env.CORS_ORIGINS ?? defaultOrigins.join(","))
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const devOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
+  "https://192.168.0.196:5556",
+  "http://192.168.0.196:5556",
+];
+
+const allowedOrigins = (() => {
+  const base = (process.env.CORS_ORIGINS ?? defaultOrigins.join(","))
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (process.env.NODE_ENV !== "production") {
+    for (const origin of devOrigins) {
+      if (!base.includes(origin)) base.push(origin);
+    }
+  }
+
+  return base;
+})();
 
 const corsHeadersBase = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PATCH, DELETE, PUT",
