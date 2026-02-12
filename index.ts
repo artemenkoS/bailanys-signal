@@ -126,7 +126,9 @@ serve<WSData>({
         }
 
         if (
-          ["offer", "answer", "ice-candidate", "hangup"].includes(data.type)
+          ["offer", "answer", "ice-candidate", "hangup", "screen-share"].includes(
+            data.type,
+          )
         ) {
           const from = ws.data.userId;
           const to = data.to;
