@@ -20,6 +20,15 @@ export interface RefreshRequest {
   refreshToken: string;
 }
 
+export interface PasswordResetRequest {
+  email: string;
+}
+
+export interface PasswordResetConfirmRequest {
+  accessToken: string;
+  password: string;
+}
+
 export interface CreateDirectMessageRequest {
   peerId: string;
   body: string;
