@@ -23,6 +23,7 @@ else
   exit 1
 fi
 
+"${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" down --remove-orphans
 "${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" pull
 "${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" up -d --remove-orphans
 "${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" ps
