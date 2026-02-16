@@ -23,6 +23,12 @@ else
   exit 1
 fi
 
+for name in bailanys-client webrtc-bun web-nginx; do
+  if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+    docker rm -f "${name}" >/dev/null
+  fi
+done
+
 "${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" down --remove-orphans
 "${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" pull
 "${COMPOSE[@]}" -f "${ROOT_DIR}/docker-compose.registry.yml" --env-file "${ROOT_DIR}/.env.registry" up -d --remove-orphans
