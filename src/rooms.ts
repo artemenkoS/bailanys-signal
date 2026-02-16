@@ -3,6 +3,12 @@ import type { WSData } from "./types";
 import { supabase } from "./supabase";
 import { rooms } from "./state";
 import { clearRoomMessages, getRoomMessages } from "./roomMessages";
+import {
+  ensureRoomMember,
+  getRoomMemberRole,
+  ROOM_MEMBER_ROLE_ADMIN,
+  ROOM_MEMBER_ROLE_MEMBER,
+} from "./roomMembers";
 import { broadcastToRoom, sendJson } from "./ws";
 
 const MISSING_TABLE_ERROR_CODE = "42P01";
@@ -226,8 +232,18 @@ export async function handleJoinRoom(
     return;
   }
 
+  const membershipResult = !isGuest
+    ? await getRoomMemberRole(roomId, userId)
+    : null;
+  const memberRole =
+    membershipResult && membershipResult.supported
+      ? membershipResult.role
+      : null;
+  const isMember = Boolean(memberRole);
+  const isCreator = roomResult.room?.created_by === userId;
+
   if (roomResult.room && roomResult.room.is_active === false) {
-    if (roomResult.room.created_by !== userId) {
+    if (!isCreator && !isMember) {
       sendJson(ws, { type: "error", message: "Room inactive" });
       return;
     }
@@ -245,6 +261,8 @@ export async function handleJoinRoom(
     }
   }
 
+  const allowMemberBypass = isMember || isCreator;
+
   const maxParticipants = Number(roomResult.room?.max_participants);
   if (Number.isFinite(maxParticipants) && maxParticipants > 0) {
     const currentSize = rooms.get(roomId)?.size ?? 0;
@@ -254,7 +272,11 @@ export async function handleJoinRoom(
     }
   }
 
-  if (roomResult.room?.is_private && !(isGuest && allowPrivateBypass)) {
+  if (
+    roomResult.room?.is_private &&
+    !(isGuest && allowPrivateBypass) &&
+    !allowMemberBypass
+  ) {
     const password = options?.password?.trim() ?? "";
     if (!password) {
       sendJson(ws, { type: "error", message: "Room password required" });
@@ -277,6 +299,10 @@ export async function handleJoinRoom(
   rooms.get(roomId)!.add(userId);
   if (!isGuest) {
     await upsertParticipantJoin(roomId, userId);
+    const desiredRole = isCreator
+      ? ROOM_MEMBER_ROLE_ADMIN
+      : memberRole ?? ROOM_MEMBER_ROLE_MEMBER;
+    await ensureRoomMember(roomId, userId, desiredRole, isCreator ? userId : null);
   }
   await setRoomActive(roomId, true);
 

@@ -2,6 +2,7 @@ import { roomMessagesByRoom } from './state';
 import { supabase } from './supabase';
 import { MISSING_COLUMN_ERROR_CODE, MISSING_TABLE_ERROR_CODE, ROOM_MESSAGE_LIMIT } from './routes/shared';
 import { decryptChatBody, encryptChatBody } from './chatCrypto';
+import { getRoomMemberRole } from './roomMembers';
 
 export type RoomMessage = {
   id: string;
@@ -106,7 +107,16 @@ export const canAccessRoomChat = async (
     const isPrivate = Boolean((data as any).is_private);
     const ownerId = (data as any).created_by;
     if (isPrivate && ownerId !== userId) {
-      return { ok: false, error: 'Room access denied' };
+      const membership = await getRoomMemberRole(roomId, userId);
+      if (membership.supported && !membership.role) {
+        return { ok: false, error: 'Room access denied' };
+      }
+      if (membership.supported === false) {
+        return { ok: false, error: 'Room access denied' };
+      }
+      if (membership.error) {
+        return { ok: false, error: 'Room access denied' };
+      }
     }
     return { ok: true };
   } catch (err) {
