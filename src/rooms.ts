@@ -181,19 +181,29 @@ export async function handleJoinRoom(
     name?: string;
     isPrivate?: boolean;
     password?: string;
+    actor?: {
+      isGuest?: boolean;
+      allowPrivateBypass?: boolean;
+    };
   },
 ) {
   const { userId } = ws.data;
+  const isGuest = Boolean(options?.actor?.isGuest);
+  const allowPrivateBypass = Boolean(options?.actor?.allowPrivateBypass);
   if (ws.data.roomId && ws.data.roomId !== roomId) {
-    await handleLeaveRoom(ws);
+    await handleLeaveRoom(ws, { skipPresence: isGuest });
   }
 
-  const createIfMissing = options?.createIfMissing ?? false;
+  const createIfMissing = !isGuest && (options?.createIfMissing ?? false);
   const roomResult = await ensureRoomRecord(roomId, userId, createIfMissing, {
-    name: options?.name,
-    isPrivate: options?.isPrivate,
-    password: options?.password,
+    name: isGuest ? undefined : options?.name,
+    isPrivate: isGuest ? undefined : options?.isPrivate,
+    password: isGuest ? undefined : options?.password,
   });
+  if (isGuest && !roomResult.room && !rooms.has(roomId)) {
+    sendJson(ws, { type: "error", message: "Room not found" });
+    return;
+  }
   if (!roomResult.allowed) {
     const errorMessage = (() => {
       switch (roomResult.error) {
@@ -223,6 +233,17 @@ export async function handleJoinRoom(
     await setRoomActive(roomId, true);
   }
 
+  if (isGuest) {
+    const activeRoom = rooms.get(roomId);
+    const hasAuthenticated = activeRoom
+      ? Array.from(activeRoom).some((id) => !id.startsWith("guest:"))
+      : false;
+    if (!hasAuthenticated) {
+      sendJson(ws, { type: "error", message: "Room inactive" });
+      return;
+    }
+  }
+
   const maxParticipants = Number(roomResult.room?.max_participants);
   if (Number.isFinite(maxParticipants) && maxParticipants > 0) {
     const currentSize = rooms.get(roomId)?.size ?? 0;
@@ -232,7 +253,7 @@ export async function handleJoinRoom(
     }
   }
 
-  if (roomResult.room?.is_private) {
+  if (roomResult.room?.is_private && !(isGuest && allowPrivateBypass)) {
     const password = options?.password?.trim() ?? "";
     if (!password) {
       sendJson(ws, { type: "error", message: "Room password required" });
@@ -253,13 +274,16 @@ export async function handleJoinRoom(
   ws.data.roomId = roomId;
   if (!rooms.has(roomId)) rooms.set(roomId, new Set());
   rooms.get(roomId)!.add(userId);
-  await upsertParticipantJoin(roomId, userId);
+  if (!isGuest) {
+    await upsertParticipantJoin(roomId, userId);
+  }
   await setRoomActive(roomId, true);
 
   sendJson(ws, {
     type: "room-joined",
     roomId,
     users: Array.from(rooms.get(roomId)!),
+    selfId: userId,
   });
   broadcastToRoom(
     roomId,
@@ -268,7 +292,10 @@ export async function handleJoinRoom(
   );
 }
 
-export async function handleLeaveRoom(ws: ServerWebSocket<WSData>) {
+export async function handleLeaveRoom(
+  ws: ServerWebSocket<WSData>,
+  options?: { skipPresence?: boolean },
+) {
   const { userId, roomId } = ws.data;
   if (!roomId) return;
 
@@ -283,14 +310,19 @@ export async function handleLeaveRoom(ws: ServerWebSocket<WSData>) {
         userId,
       );
   }
-  await deactivateParticipant(roomId, userId);
+  if (!options?.skipPresence) {
+    await deactivateParticipant(roomId, userId);
+  }
   if (!rooms.has(roomId)) {
     await setRoomActive(roomId, false);
   }
   ws.data.roomId = undefined;
 }
 
-export async function removeUserFromRooms(userId: string) {
+export async function removeUserFromRooms(
+  userId: string,
+  options?: { skipPresence?: boolean },
+) {
   for (const [roomId, room] of rooms) {
     if (!room.has(userId)) continue;
     room.delete(userId);
@@ -301,7 +333,9 @@ export async function removeUserFromRooms(userId: string) {
         { type: "room-user-left", roomId, userId },
         userId,
       );
-    await deactivateParticipant(roomId, userId);
+    if (!options?.skipPresence) {
+      await deactivateParticipant(roomId, userId);
+    }
     if (!rooms.has(roomId)) {
       await setRoomActive(roomId, false);
     }

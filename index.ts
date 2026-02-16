@@ -6,6 +6,7 @@ import { errorResponse, withCors } from "./src/http";
 import { setPresence, touchLastSeen, validateToken } from "./src/supabase";
 import { users, activeCalls, rooms } from "./src/state";
 import { broadcast, sendJson, sendToUser } from "./src/ws";
+import { verifyGuestToken } from "./src/guestTokens";
 import {
   handleJoinRoom,
   handleLeaveRoom,
@@ -73,6 +74,25 @@ serve<WSData>({
     if (req.method === "OPTIONS") return withCors(new Response(null), req);
 
     if (url.pathname === "/ws") {
+      const guestToken = url.searchParams.get("guest");
+      if (guestToken) {
+        const guestPayload = verifyGuestToken(guestToken);
+        if (!guestPayload) {
+          return withCors(errorResponse("Unauthorized", 401), req);
+        }
+        const upgraded = server.upgrade(req, {
+          data: {
+            userId: guestPayload.guestId,
+            isGuest: true,
+            guestRoomId: guestPayload.roomId,
+            guestAllowPrivate: guestPayload.allowPrivate,
+          },
+        });
+        return upgraded
+          ? undefined
+          : withCors(errorResponse("Upgrade failed", 500), req);
+      }
+
       const token = url.searchParams.get("token");
       const userId = token ? await validateToken(token) : null;
       if (!userId) return withCors(errorResponse("Unauthorized", 401), req);
@@ -98,6 +118,7 @@ serve<WSData>({
 
     async open(ws) {
       const { userId } = ws.data;
+      const isGuest = Boolean(ws.data.isGuest);
       ws.data.lastPongAt = Date.now();
       let sockets = users.get(userId);
       const isFirstConnection = !sockets || sockets.size === 0;
@@ -107,10 +128,18 @@ serve<WSData>({
       }
       sockets.add(ws);
 
-      if (isFirstConnection) {
+      if (isFirstConnection && !isGuest) {
         const status = resolvePresenceStatus(userId);
         await updateUserStatus(userId, status);
         broadcast({ type: "user-connected", userId }, userId);
+      }
+      if (isGuest && ws.data.guestRoomId) {
+        await handleJoinRoom(ws, ws.data.guestRoomId, {
+          actor: {
+            isGuest: true,
+            allowPrivateBypass: Boolean(ws.data.guestAllowPrivate),
+          },
+        });
       }
       console.log(`[WSS] Connected: ${userId}`);
     },
@@ -118,10 +147,13 @@ serve<WSData>({
     async message(ws, message) {
       try {
         const data = JSON.parse(message as string) as WebSocketMessage;
+        const isGuest = Boolean(ws.data.isGuest);
         ws.data.lastPongAt = Date.now();
 
         if (data.type === "presence-pong") {
-          void touchLastSeen([ws.data.userId]);
+          if (!isGuest) {
+            void touchLastSeen([ws.data.userId]);
+          }
           return;
         }
 
@@ -130,6 +162,7 @@ serve<WSData>({
             data.type,
           )
         ) {
+          if (isGuest) return;
           const from = ws.data.userId;
           const to = data.to;
           if (!to) return;
@@ -176,6 +209,7 @@ serve<WSData>({
         }
 
         if (data.type === "typing") {
+          if (isGuest) return;
           const from = ws.data.userId;
           const to = typeof data.to === "string" ? data.to : "";
           const isTyping = Boolean(data.isTyping);
@@ -197,6 +231,9 @@ serve<WSData>({
 
         switch (data.type) {
           case "join-room":
+            if (isGuest) {
+              break;
+            }
             if (!data.roomId) {
               sendJson(ws, { type: "error", message: "Room not found" });
               break;
@@ -213,13 +250,16 @@ serve<WSData>({
             );
             break;
           case "leave-room":
-            await handleLeaveRoom(ws);
-            void updateUserStatus(
-              ws.data.userId,
-              resolvePresenceStatus(ws.data.userId),
-            );
+            await handleLeaveRoom(ws, { skipPresence: isGuest });
+            if (!isGuest) {
+              void updateUserStatus(
+                ws.data.userId,
+                resolvePresenceStatus(ws.data.userId),
+              );
+            }
             break;
           case "start-call":
+            if (isGuest) break;
             sendToUser(data.receiverId!, {
               type: "incoming-call",
               from: ws.data.userId,
@@ -234,6 +274,7 @@ serve<WSData>({
 
     async close(ws) {
       const { userId } = ws.data;
+      const isGuest = Boolean(ws.data.isGuest);
       const sockets = users.get(userId);
       if (sockets) {
         sockets.delete(ws);
@@ -241,21 +282,23 @@ serve<WSData>({
       }
       const isLastConnection = !sockets || sockets.size === 0;
       if (isLastConnection) {
-        await removeUserFromRooms(userId);
-        const peerId = activeCalls.get(userId);
-        if (peerId) {
-          activeCalls.delete(userId);
-          activeCalls.delete(peerId);
-          const peerStatus = resolvePresenceStatus(peerId);
-          void updateUserStatus(peerId, peerStatus);
-          sendToUser(peerId, {
-            type: "hangup",
-            from: userId,
-            reason: "ended",
-          });
+        await removeUserFromRooms(userId, { skipPresence: isGuest });
+        if (!isGuest) {
+          const peerId = activeCalls.get(userId);
+          if (peerId) {
+            activeCalls.delete(userId);
+            activeCalls.delete(peerId);
+            const peerStatus = resolvePresenceStatus(peerId);
+            void updateUserStatus(peerId, peerStatus);
+            sendToUser(peerId, {
+              type: "hangup",
+              from: userId,
+              reason: "ended",
+            });
+          }
+          await updateUserStatus(userId, "offline");
+          broadcast({ type: "user-disconnected", userId }, userId);
         }
-        await updateUserStatus(userId, "offline");
-        broadcast({ type: "user-disconnected", userId }, userId);
       }
       console.log(`[WSS] Disconnected: ${userId}`);
     },

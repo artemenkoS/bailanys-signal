@@ -8,6 +8,7 @@ import {
   processAvatarImage,
   uploadRoomAvatar,
 } from '../storage';
+import { createGuestToken } from '../guestTokens';
 
 import type { RouteHandler } from './shared';
 import { MISSING_COLUMN_ERROR_CODE, MISSING_TABLE_ERROR_CODE, nowIso } from './shared';
@@ -249,6 +250,36 @@ export const roomRoutes: Record<string, RouteHandler> = {
     }
 
     return errorResponse('Method not allowed', 405);
+  },
+
+  '/api/rooms/guest-link': async (req: Request) => {
+    const token = getBearerToken(req);
+    const userId = token ? await validateToken(token) : null;
+    if (!userId) return errorResponse('Unauthorized', 401);
+    if (req.method !== 'POST') return errorResponse('Method not allowed', 405);
+
+    try {
+      const body = (await req.json()) as { roomId?: string; ttlSeconds?: number };
+      const roomId = body?.roomId?.trim();
+      if (!roomId) return errorResponse('Room id is required', 400);
+
+      const room = rooms.get(roomId);
+      if (!room || !room.has(userId)) {
+        return errorResponse('Forbidden', 403);
+      }
+
+      const { token: guestToken, payload } = createGuestToken(roomId, {
+        ttlSeconds: body?.ttlSeconds,
+        allowPrivate: true,
+      });
+
+      return jsonResponse({
+        token: guestToken,
+        expiresAt: new Date(payload.exp * 1000).toISOString(),
+      });
+    } catch {
+      return errorResponse('Invalid request body', 400);
+    }
   },
 
   '/api/rooms/mine': async (req: Request) => {

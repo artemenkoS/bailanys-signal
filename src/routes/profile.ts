@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 
 import type { UpdateProfileRequest } from '../types';
 import { errorResponse, getBearerToken, jsonResponse } from '../http';
+import { verifyGuestToken } from '../guestTokens';
 import { supabase, validateToken } from '../supabase';
 import {
   deleteAvatarByUrl,
@@ -255,6 +256,21 @@ export const profileRoutes: Record<string, RouteHandler> = {
 
     try {
       const { iceServers, ttlSeconds } = buildIceServers(userId);
+      return jsonResponse({ iceServers, ttlSeconds });
+    } catch (error: any) {
+      return errorResponse(error?.message ?? 'ICE servers are not configured', 500);
+    }
+  },
+
+  '/api/guest/ice-servers': async (req: Request) => {
+    if (req.method !== 'GET') return errorResponse('Method not allowed', 405);
+    const url = new URL(req.url);
+    const token = getBearerToken(req) ?? url.searchParams.get('token');
+    const payload = verifyGuestToken(token);
+    if (!payload) return errorResponse('Unauthorized', 401);
+
+    try {
+      const { iceServers, ttlSeconds } = buildIceServers(payload.guestId);
       return jsonResponse({ iceServers, ttlSeconds });
     } catch (error: any) {
       return errorResponse(error?.message ?? 'ICE servers are not configured', 500);

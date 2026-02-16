@@ -2,6 +2,9 @@ export interface WSData {
   userId: string;
   roomId?: string;
   lastPongAt?: number;
+  isGuest?: boolean;
+  guestRoomId?: string;
+  guestAllowPrivate?: boolean;
 }
 
 export interface RegisterRequest {
