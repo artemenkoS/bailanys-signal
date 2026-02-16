@@ -1,6 +1,6 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac } from "node:crypto";
 
-const DEFAULT_GUEST_TOKEN_TTL_SECONDS = 3600;
+const DEFAULT_GUEST_TOKEN_TTL_SECONDS = 300;
 const MIN_GUEST_TOKEN_TTL_SECONDS = 300;
 const MAX_GUEST_TOKEN_TTL_SECONDS = 86_400;
 
@@ -19,7 +19,7 @@ const GUEST_TOKEN_SECRET = resolveGuestTokenSecret();
 export interface GuestTokenPayload {
   v: number;
   roomId: string;
-  guestId: string;
+  guestId?: string;
   iat: number;
   exp: number;
   allowPrivate: boolean;
@@ -39,7 +39,8 @@ const sign = (payloadB64: string) =>
 export const resolveGuestTokenTtl = (requestedTtl?: number | null) => {
   const base = Number.isFinite(requestedTtl) ? Number(requestedTtl) : null;
   const envDefault = Number.parseInt(
-    process.env.GUEST_LINK_TTL_SECONDS ?? String(DEFAULT_GUEST_TOKEN_TTL_SECONDS),
+    process.env.GUEST_LINK_TTL_SECONDS ??
+      String(DEFAULT_GUEST_TOKEN_TTL_SECONDS),
     10,
   );
   const fallback = Number.isFinite(envDefault)
@@ -59,9 +60,8 @@ export const createGuestToken = (
   const ttlSeconds = resolveGuestTokenTtl(options?.ttlSeconds);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const payload: GuestTokenPayload = {
-    v: 1,
+    v: 2,
     roomId,
-    guestId: `guest:${randomUUID()}`,
     iat: nowSeconds,
     exp: nowSeconds + ttlSeconds,
     allowPrivate: options?.allowPrivate ?? true,
@@ -78,9 +78,11 @@ export const verifyGuestToken = (token?: string | null) => {
   const expected = sign(payloadB64);
   if (expected !== signature) return null;
   try {
-    const payload = JSON.parse(base64UrlDecode(payloadB64)) as GuestTokenPayload;
-    if (!payload || payload.v !== 1) return null;
-    if (!payload.roomId || !payload.guestId) return null;
+    const payload = JSON.parse(
+      base64UrlDecode(payloadB64),
+    ) as GuestTokenPayload;
+    if (!payload || (payload.v !== 1 && payload.v !== 2)) return null;
+    if (!payload.roomId) return null;
     const nowSeconds = Math.floor(Date.now() / 1000);
     if (!Number.isFinite(payload.exp) || payload.exp <= nowSeconds) return null;
     return payload;

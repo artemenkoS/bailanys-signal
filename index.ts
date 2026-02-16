@@ -1,5 +1,6 @@
 import { serve } from "bun";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { WebSocketMessage, WSData } from "./src/types";
 import { routes } from "./src/routes";
 import { errorResponse, withCors } from "./src/http";
@@ -92,9 +93,14 @@ serve<WSData>({
         if (!guestPayload) {
           return withCors(errorResponse("Unauthorized", 401), req);
         }
+        const guestIdParam = url.searchParams.get("guestId")?.trim() ?? "";
+        const guestId =
+          guestIdParam.startsWith("guest:") && guestIdParam.length <= 128
+            ? guestIdParam
+            : `guest:${randomUUID()}`;
         const upgraded = server.upgrade(req, {
           data: {
-            userId: guestPayload.guestId,
+            userId: guestId,
             isGuest: true,
             guestRoomId: guestPayload.roomId,
             guestAllowPrivate: guestPayload.allowPrivate,

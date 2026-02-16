@@ -270,7 +270,9 @@ export const profileRoutes: Record<string, RouteHandler> = {
     if (!payload) return errorResponse('Unauthorized', 401);
 
     try {
-      const { iceServers, ttlSeconds } = buildIceServers(payload.guestId);
+      const signature = token?.split('.')[1] ?? '';
+      const guestId = payload.guestId ?? `guest:${signature.slice(0, 16) || payload.roomId}`;
+      const { iceServers, ttlSeconds } = buildIceServers(guestId);
       return jsonResponse({ iceServers, ttlSeconds });
     } catch (error: any) {
       return errorResponse(error?.message ?? 'ICE servers are not configured', 500);
