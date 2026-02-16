@@ -4,8 +4,14 @@ import type { WebSocketMessage, WSData } from "./src/types";
 import { routes } from "./src/routes";
 import { errorResponse, withCors } from "./src/http";
 import { setPresence, touchLastSeen, validateToken } from "./src/supabase";
-import { users, activeCalls, rooms } from "./src/state";
-import { broadcast, sendJson, sendToUser } from "./src/ws";
+import { users, activeCalls, rooms, roomChats } from "./src/state";
+import {
+  broadcast,
+  broadcastToRoom,
+  broadcastToRoomChat,
+  sendJson,
+  sendToUser,
+} from "./src/ws";
 import { verifyGuestToken } from "./src/guestTokens";
 import {
   handleJoinRoom,
@@ -13,7 +19,13 @@ import {
   isUserInAnyRoom,
   removeUserFromRooms,
 } from "./src/rooms";
+import {
+  canAccessRoomChat,
+  getRoomMessages,
+  storeRoomMessage,
+} from "./src/roomMessages";
 import { PRESENCE_HEARTBEAT_MS, PRESENCE_TTL_MS } from "./src/presence";
+import { ROOM_MESSAGE_MAX_LENGTH, nowIso } from "./src/routes/shared";
 
 const port = process.env.PORT ?? 8080;
 const tlsEnabled = process.env.TLS_ENABLED === "true";
@@ -229,6 +241,73 @@ serve<WSData>({
           return;
         }
 
+        if (data.type === "join-room-chat") {
+          const roomId = typeof data.roomId === "string" ? data.roomId : "";
+          if (!roomId) return;
+          const access = await canAccessRoomChat(ws.data.userId, roomId);
+          if (!access.ok) {
+            sendJson(ws, {
+              type: "error",
+              message: access.error ?? "Room access denied",
+            });
+            return;
+          }
+          if (!roomChats.has(roomId)) roomChats.set(roomId, new Set());
+          roomChats.get(roomId)!.add(ws.data.userId);
+          if (!ws.data.chatRooms) ws.data.chatRooms = new Set();
+          ws.data.chatRooms.add(roomId);
+
+          const history = await getRoomMessages(roomId);
+          sendJson(ws, { type: "room-messages", roomId, messages: history });
+          return;
+        }
+
+        if (data.type === "leave-room-chat") {
+          const roomId = typeof data.roomId === "string" ? data.roomId : "";
+          if (!roomId) return;
+          const room = roomChats.get(roomId);
+          if (room) {
+            room.delete(ws.data.userId);
+            if (room.size === 0) roomChats.delete(roomId);
+          }
+          ws.data.chatRooms?.delete(roomId);
+          return;
+        }
+
+        if (data.type === "room-message") {
+          const from = ws.data.userId;
+          const roomId = typeof data.roomId === "string" ? data.roomId : "";
+          if (!roomId) return;
+          const access = await canAccessRoomChat(from, roomId);
+          if (!access.ok) {
+            sendJson(ws, {
+              type: "error",
+              message: access.error ?? "Room access denied",
+            });
+            return;
+          }
+          const body = typeof data.body === "string" ? data.body.trim() : "";
+          if (!body) return;
+          if (body.length > ROOM_MESSAGE_MAX_LENGTH) {
+            sendJson(ws, { type: "error", message: "Message too long" });
+            return;
+          }
+          const messagePayload = {
+            id: crypto.randomUUID(),
+            room_id: roomId,
+            sender_id: from,
+            body,
+            created_at: nowIso(),
+          };
+          await storeRoomMessage(roomId, messagePayload);
+          broadcastToRoomChat(roomId, {
+            type: "room-message",
+            roomId,
+            message: messagePayload,
+          });
+          return;
+        }
+
         switch (data.type) {
           case "join-room":
             if (isGuest) {
@@ -283,6 +362,16 @@ serve<WSData>({
       const isLastConnection = !sockets || sockets.size === 0;
       if (isLastConnection) {
         await removeUserFromRooms(userId, { skipPresence: isGuest });
+        if (ws.data.chatRooms) {
+          for (const roomId of ws.data.chatRooms) {
+            const room = roomChats.get(roomId);
+            if (room) {
+              room.delete(userId);
+              if (room.size === 0) roomChats.delete(roomId);
+            }
+          }
+          ws.data.chatRooms.clear();
+        }
         if (!isGuest) {
           const peerId = activeCalls.get(userId);
           if (peerId) {

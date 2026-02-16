@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import type { WSData } from "./types";
-import { users, rooms } from "./state";
+import { users, rooms, roomChats } from "./state";
 
 export function sendJson(
   ws: ServerWebSocket<WSData>,
@@ -35,6 +35,20 @@ export function broadcastToRoom(
   excludeUserId?: string,
 ) {
   const room = rooms.get(roomId);
+  if (!room) return;
+  for (const userId of room) {
+    if (userId !== excludeUserId) {
+      sendToUser(userId, message);
+    }
+  }
+}
+
+export function broadcastToRoomChat(
+  roomId: string,
+  message: Record<string, any>,
+  excludeUserId?: string,
+) {
+  const room = roomChats.get(roomId);
   if (!room) return;
   for (const userId of room) {
     if (userId !== excludeUserId) {

@@ -5,6 +5,8 @@ export type RouteHandler = (req: Request) => Promise<Response>;
 export const CALL_HISTORY_LIMIT = 50;
 export const DIRECT_MESSAGE_LIMIT = 100;
 export const DIRECT_MESSAGE_MAX_LENGTH = 10000;
+export const ROOM_MESSAGE_LIMIT = 200;
+export const ROOM_MESSAGE_MAX_LENGTH = 2000;
 export const MISSING_TABLE_ERROR_CODE = '42P01';
 export const MISSING_COLUMN_ERROR_CODE = '42703';
 export const USERNAME_MIN_LENGTH = 4;

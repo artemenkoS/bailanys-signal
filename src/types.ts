@@ -5,6 +5,7 @@ export interface WSData {
   isGuest?: boolean;
   guestRoomId?: string;
   guestAllowPrivate?: boolean;
+  chatRooms?: Set<string>;
 }
 
 export interface RegisterRequest {

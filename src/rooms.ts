@@ -2,6 +2,7 @@ import type { ServerWebSocket } from "bun";
 import type { WSData } from "./types";
 import { supabase } from "./supabase";
 import { rooms } from "./state";
+import { clearRoomMessages, getRoomMessages } from "./roomMessages";
 import { broadcastToRoom, sendJson } from "./ws";
 
 const MISSING_TABLE_ERROR_CODE = "42P01";
@@ -285,6 +286,14 @@ export async function handleJoinRoom(
     users: Array.from(rooms.get(roomId)!),
     selfId: userId,
   });
+  const roomMessages = await getRoomMessages(roomId);
+  if (roomMessages.length > 0) {
+    sendJson(ws, {
+      type: "room-messages",
+      roomId,
+      messages: roomMessages,
+    });
+  }
   broadcastToRoom(
     roomId,
     { type: "room-user-joined", roomId, userId },
@@ -302,7 +311,10 @@ export async function handleLeaveRoom(
   const room = rooms.get(roomId);
   if (room) {
     room.delete(userId);
-    if (room.size === 0) rooms.delete(roomId);
+    if (room.size === 0) {
+      rooms.delete(roomId);
+      clearRoomMessages(roomId);
+    }
     else
       broadcastToRoom(
         roomId,
@@ -326,7 +338,10 @@ export async function removeUserFromRooms(
   for (const [roomId, room] of rooms) {
     if (!room.has(userId)) continue;
     room.delete(userId);
-    if (room.size === 0) rooms.delete(roomId);
+    if (room.size === 0) {
+      rooms.delete(roomId);
+      clearRoomMessages(roomId);
+    }
     else
       broadcastToRoom(
         roomId,

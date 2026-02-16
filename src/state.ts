@@ -3,6 +3,7 @@ import type { CallDirection, CallHistoryStatus, CallKind, WSData } from "./types
 
 export const users = new Map<string, Set<ServerWebSocket<WSData>>>();
 export const rooms = new Map<string, Set<string>>();
+export const roomChats = new Map<string, Set<string>>();
 export const activeCalls = new Map<string, string>();
 
 export interface InMemoryCallLog {
@@ -30,3 +31,13 @@ export interface InMemoryDirectMessage {
 }
 
 export const directMessagesByUser = new Map<string, InMemoryDirectMessage[]>();
+
+export interface InMemoryRoomMessage {
+  id: string;
+  room_id: string;
+  sender_id: string;
+  body: string;
+  created_at: string;
+}
+
+export const roomMessagesByRoom = new Map<string, InMemoryRoomMessage[]>();

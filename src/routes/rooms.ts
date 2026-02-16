@@ -9,9 +9,11 @@ import {
   uploadRoomAvatar,
 } from '../storage';
 import { createGuestToken } from '../guestTokens';
+import { canAccessRoomChat, getRoomMessages, storeRoomMessage } from '../roomMessages';
+import { broadcastToRoomChat } from '../ws';
 
 import type { RouteHandler } from './shared';
-import { MISSING_COLUMN_ERROR_CODE, MISSING_TABLE_ERROR_CODE, nowIso } from './shared';
+import { MISSING_COLUMN_ERROR_CODE, MISSING_TABLE_ERROR_CODE, ROOM_MESSAGE_MAX_LENGTH, nowIso } from './shared';
 
 export const roomRoutes: Record<string, RouteHandler> = {
   '/api/rooms': async (req: Request) => {
@@ -280,6 +282,61 @@ export const roomRoutes: Record<string, RouteHandler> = {
     } catch {
       return errorResponse('Invalid request body', 400);
     }
+  },
+
+  '/api/rooms/messages': async (req: Request) => {
+    const token = getBearerToken(req);
+    const userId = token ? await validateToken(token) : null;
+    if (!userId) return errorResponse('Unauthorized', 401);
+
+    if (req.method === 'GET') {
+      const url = new URL(req.url);
+      const roomId = url.searchParams.get('roomId')?.trim() ?? '';
+      if (!roomId) return errorResponse('roomId is required', 400);
+
+      const access = await canAccessRoomChat(userId, roomId);
+      if (!access.ok) return errorResponse(access.error ?? 'Forbidden', access.error === 'Room not found' ? 404 : 403);
+
+      const messages = await getRoomMessages(roomId);
+      return jsonResponse({ messages });
+    }
+
+    if (req.method === 'POST') {
+      let body: { roomId?: string; body?: string };
+      try {
+        body = (await req.json()) as { roomId?: string; body?: string };
+      } catch {
+        return errorResponse('Invalid request body', 400);
+      }
+
+      const roomId = typeof body.roomId === 'string' ? body.roomId.trim() : '';
+      const messageBody = typeof body.body === 'string' ? body.body.trim() : '';
+      if (!roomId) return errorResponse('roomId is required', 400);
+      if (!messageBody) return errorResponse('Message body is required', 400);
+      if (messageBody.length > ROOM_MESSAGE_MAX_LENGTH) return errorResponse('Message is too long', 400);
+
+      const access = await canAccessRoomChat(userId, roomId);
+      if (!access.ok) return errorResponse(access.error ?? 'Forbidden', access.error === 'Room not found' ? 404 : 403);
+
+      const messagePayload = {
+        id: crypto.randomUUID(),
+        room_id: roomId,
+        sender_id: userId,
+        body: messageBody,
+        created_at: nowIso(),
+      };
+
+      await storeRoomMessage(roomId, messagePayload);
+      broadcastToRoomChat(roomId, {
+        type: 'room-message',
+        roomId,
+        message: messagePayload,
+      });
+
+      return jsonResponse({ message: messagePayload }, 201);
+    }
+
+    return errorResponse('Method not allowed', 405);
   },
 
   '/api/rooms/mine': async (req: Request) => {
